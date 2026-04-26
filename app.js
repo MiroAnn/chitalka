@@ -1565,7 +1565,10 @@ tags:
         await this.renderLibrary();
         this.showToast(`✓ Добавлено ${added} ${this._pluralBooks(added)} из Dropbox`);
       }
-    } catch { /* network error — ignore */ }
+    } catch (e) {
+      // Показываем ошибку, но не крашим приложение
+      this.showToast('📦 Dropbox: ' + e.message.slice(0, 80), 5000);
+    }
   }
 
   _pluralBooks(n) {
@@ -1644,7 +1647,22 @@ tags:
     try {
       files = await this.dropbox.listBooks();
     } catch (e) {
-      container.innerHTML = `<div class="dbx-empty">Ошибка: ${e.message}</div>`;
+      // Показываем реальную ошибку + кнопку переподключения
+      container.innerHTML = `
+        <div class="dbx-empty">
+          <strong>Ошибка доступа к Dropbox:</strong><br>
+          <code style="font-size:12px;word-break:break-all">${escHtml(e.message)}</code>
+          <br><br>
+          Скорее всего нужно:<br>
+          1. Добавить права в Dropbox App Console:<br>
+          &nbsp;&nbsp;<strong>Permissions → files.metadata.read + files.content.read</strong><br>
+          2. Переподключить Dropbox (токен обновится)
+          <br><br>
+          <button class="btn-primary" id="dbx-reconnect-btn" style="margin-top:4px">🔄 Переподключить</button>
+        </div>`;
+      document.getElementById('dbx-reconnect-btn')?.addEventListener('click', () => {
+        this.disconnectDropbox();
+      });
       return;
     }
 
@@ -1723,7 +1741,7 @@ tags:
     } catch (e) {
       btn.textContent = 'Скачать';
       btn.disabled = false;
-      this.showToast('Ошибка: ' + e.message);
+      this.showToast('Ошибка: ' + (e.message || String(e)), 5000);
     }
   }
 

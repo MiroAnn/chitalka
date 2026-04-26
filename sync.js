@@ -179,6 +179,14 @@ class SyncClient {
 
 // ── DROPBOX SYNC ──────────────────────────────────────────────
 
+// JSON для HTTP-заголовков: не-ASCII символы экранируются как \uXXXX
+// (HTTP headers допускают только ISO-8859-1, кириллица в них недопустима)
+function _dbxHeaderJson(obj) {
+  return JSON.stringify(obj).replace(/[^\x00-\x7F]/g, c =>
+    '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0')
+  );
+}
+
 // PKCE helpers
 function _dbxVerifier() {
   const arr = new Uint8Array(32);
@@ -293,28 +301,32 @@ class DropboxSync {
 
   // ── Список книг из папки /Читалка (с fallback на корень) ──
   async listBooks() {
-    // Пробуем /Читалка; если 400 (App Folder или недопустимый путь) — пробуем корень
-    const entries = await this._listFolder(this.folder);
-    if (entries !== null) return this._filterBookEntries(entries);
-
-    const rootEntries = await this._listFolder('');
-    if (rootEntries !== null) return this._filterBookEntries(rootEntries);
-
-    throw new Error('Не удалось получить список книг. Проверь тип приложения Dropbox: нужен Full Dropbox (или книги в корне App Folder).');
+    // Пробуем /Читалка; если 400 (недопустимый путь для App Folder) — пробуем корень ''
+    try {
+      const entries = await this._listFolder(this.folder);
+      return this._filterBookEntries(entries);
+    } catch (e) {
+      if (e.httpStatus !== 400) throw e; // не path-ошибка — прокидываем дальше
+    }
+    // Fallback: корень (для App Folder apps)
+    const entries = await this._listFolder('');
+    return this._filterBookEntries(entries);
   }
 
-  // Возвращает entries[] или null если путь недоступен (400), бросает при сетевых ошибках
+  // Бросает ошибку с реальным текстом Dropbox для любого не-ok статуса
   async _listFolder(path) {
     const res = await this._fetch('https://api.dropboxapi.com/2/files/list_folder', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path, recursive: false }),
     });
-    if (res.status === 409) return []; // путь не найден — папка пуста или не создана
-    if (res.status === 400) return null; // недопустимый путь — попробуем другой
+    if (res.status === 409) return []; // папка не найдена — возвращаем пустой список
     if (!res.ok) {
       const errText = await res.text().catch(() => '');
-      throw new Error(`Dropbox error ${res.status}: ${errText.slice(0, 120)}`);
+      const err = new Error(`Dropbox ${res.status}: ${errText.slice(0, 200)}`);
+      err.httpStatus = res.status;
+      err.dropboxBody = errText;
+      throw err;
     }
     const data = await res.json();
     return data.entries || [];
@@ -337,11 +349,25 @@ class DropboxSync {
   async downloadFile(path) {
     const res = await this._fetch('https://content.dropboxapi.com/2/files/download', {
       method: 'POST',
-      headers: { 'Dropbox-API-Arg': JSON.stringify({ path }) },
+      headers: { 'Dropbox-API-Arg': _dbxHeaderJson({ path }) },
     });
-    if (!res.ok) throw new Error(`Ошибка скачивания (${res.status})`);
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(`Ошибка скачивания (${res.status}): ${errText.slice(0, 100)}`);
+    }
+
+    // res.arrayBuffer() — лучшая совместимость с Safari/iOS чем blob.arrayBuffer()
+    if (typeof res.arrayBuffer === 'function') {
+      return res.arrayBuffer();
+    }
+    // Fallback для очень старых Safari: через FileReader
     const blob = await res.blob();
-    return blob.arrayBuffer();
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload  = () => resolve(reader.result);
+      reader.onerror = () => reject(new Error('FileReader error: ' + reader.error));
+      reader.readAsArrayBuffer(blob);
+    });
   }
 
   static formatSize(bytes) {
