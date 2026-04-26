@@ -1,0 +1,18 @@
+{
+  "name": "Читалка",
+  "short_name": "Читалка",
+  "description": "Читалка с заметками и синхронизацией с Obsidian",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f8f3e8",
+  "theme_color": "#5c3d1e",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

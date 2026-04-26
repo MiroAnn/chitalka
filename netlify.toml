@@ -1,0 +1,15 @@
+[[headers]]
+  for = "/sw.js"
+  [headers.values]
+    # Service worker должен обновляться, не кешироваться
+    Cache-Control = "no-cache, no-store, must-revalidate"
+
+[[headers]]
+  for = "/*.js"
+  [headers.values]
+    Cache-Control = "public, max-age=86400"
+
+[[headers]]
+  for = "/*.css"
+  [headers.values]
+    Cache-Control = "public, max-age=86400"

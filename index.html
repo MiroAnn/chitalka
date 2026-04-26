@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Читалка">
+  <meta name="theme-color" content="#f8f3e8">
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icon.svg">
+  <link rel="stylesheet" href="style.css">
+  <title>Читалка</title>
+</head>
+<body class="theme-sepia">
+
+  <!-- ══ LIBRARY ═══════════════════════════════════════════ -->
+  <div id="library" class="screen active">
+    <header class="lib-header">
+      <h1>📚 Читалка</h1>
+      <div class="header-actions">
+        <button class="icon-btn" id="obsidian-global-btn" title="Настроить Obsidian">🔮</button>
+        <button class="icon-btn" id="global-settings-btn" title="Настройки">⚙️</button>
+      </div>
+    </header>
+    <div class="books-scroll">
+      <div class="books-grid" id="books-grid">
+        <!-- Book cards injected here -->
+      </div>
+      <div class="empty-library" id="empty-library" style="display:none">
+        <div class="empty-icon">📖</div>
+        <p>Библиотека пуста.<br>Нажми <strong>+</strong> чтобы добавить книгу.<br>Поддерживаются EPUB, PDF, TXT, FB2.</p>
+      </div>
+    </div>
+    <button class="add-book-btn" id="add-book-btn" title="Добавить книгу">+</button>
+  </div>
+
+  <!-- ══ READER ════════════════════════════════════════════ -->
+  <div id="reader" class="screen">
+    <header class="reader-header">
+      <button class="icon-btn" id="back-btn" title="В библиотеку">←</button>
+      <span class="reader-title" id="reader-title"></span>
+      <button class="icon-btn" id="reader-settings-btn" title="Настройки">Аа</button>
+      <button class="icon-btn" id="annotations-btn" title="Заметки">
+        🗒 <span class="badge" id="ann-count" style="display:none;font-size:9px;margin-left:1px"></span>
+      </button>
+    </header>
+
+    <div class="reader-body" id="reader-body">
+      <!-- Content rendered here by JS depending on format -->
+      <div class="loading" id="reader-loading">
+        <div class="spinner"></div>
+        <span>Загрузка книги…</span>
+      </div>
+    </div>
+
+    <footer class="reader-footer" id="reader-footer" style="display:none">
+      <div class="progress-track">
+        <div class="progress-fill" id="progress-fill" style="width:0%"></div>
+      </div>
+      <span class="progress-pct" id="progress-pct">0%</span>
+    </footer>
+  </div>
+
+  <!-- ══ SELECTION BAR ════════════════════════════════════ -->
+  <div id="selection-bar">
+    <button class="sel-btn" id="highlight-btn">
+      <span class="sel-icon">🖊</span> Цитата
+    </button>
+    <div class="sel-divider"></div>
+    <button class="sel-btn" id="note-btn">
+      <span class="sel-icon">📝</span> Заметка
+    </button>
+  </div>
+
+  <!-- ══ NOTE MODAL ════════════════════════════════════════ -->
+  <div id="note-modal">
+    <div class="note-modal-inner">
+      <div class="note-modal-header">
+        <h3>📝 Заметка</h3>
+        <button class="icon-btn" id="note-modal-close">✕</button>
+      </div>
+      <div class="note-selected-quote" id="note-quote-preview"></div>
+      <textarea id="note-textarea" placeholder="Напиши свою мысль…" rows="4"></textarea>
+      <div class="note-modal-actions">
+        <button class="btn-secondary" id="note-cancel">Отмена</button>
+        <button class="btn-primary" id="note-save">Сохранить</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ ANNOTATIONS PANEL ════════════════════════════════ -->
+  <div id="overlay"></div>
+  <div id="annotations-panel">
+    <div class="ann-header">
+      <h3>Цитаты и заметки</h3>
+      <button class="ann-sync-btn" id="sync-obsidian-btn" title="Синхронизировать с Obsidian">
+        🔮 Obsidian
+      </button>
+    </div>
+    <div class="ann-list" id="ann-list">
+      <div class="ann-empty">Нет заметок. Выдели текст в читалке, чтобы сохранить цитату или написать заметку.</div>
+    </div>
+    <div class="ann-setup">
+      <button class="obsidian-setup-btn" id="obsidian-setup-btn">
+        🔮 Указать папку Obsidian vault
+      </button>
+      <div class="obsidian-path" id="obsidian-path" style="display:none"></div>
+    </div>
+  </div>
+
+  <!-- ══ SETTINGS PANEL ═══════════════════════════════════ -->
+  <div id="settings-panel">
+    <div class="settings-inner">
+      <h3>⚙️ Настройки чтения</h3>
+      <div class="settings-row">
+        <label>Тема</label>
+        <div class="theme-buttons">
+          <button class="theme-btn sepia active" data-theme="sepia" title="Сепия"></button>
+          <button class="theme-btn light" data-theme="light" title="Светлая"></button>
+          <button class="theme-btn dark" data-theme="dark" title="Тёмная"></button>
+        </div>
+      </div>
+      <div class="settings-row">
+        <label>Размер шрифта</label>
+        <div class="font-size-ctrl">
+          <button id="font-minus">−</button>
+          <span id="font-size-label">19</span>
+          <button id="font-plus">+</button>
+        </div>
+      </div>
+      <div class="settings-row">
+        <label>Межстрочный</label>
+        <div class="line-height-ctrl">
+          <button id="lh-minus">−</button>
+          <span id="lh-label">1.8</span>
+          <button id="lh-plus">+</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ DRAG HINT ═════════════════════════════════════════ -->
+  <div class="dragover-hint" id="dragover-hint">
+    Перетащи книгу сюда
+  </div>
+
+  <!-- ══ TOAST ═════════════════════════════════════════════ -->
+  <div id="toast"></div>
+
+  <!-- ══ HIDDEN FILE INPUT ════════════════════════════════ -->
+  <input type="file" id="file-input" accept=".epub,.pdf,.txt,.fb2" style="display:none" multiple>
+
+  <!-- ══ SCRIPTS ═══════════════════════════════════════════ -->
+  <!-- epub.js -->
+  <script src="https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js"></script>
+  <!-- pdf.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script>
+    if (typeof pdfjsLib !== 'undefined') {
+      pdfjsLib.GlobalWorkerOptions.workerSrc =
+        'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    }
+  </script>
+  <script src="app.js"></script>
+</body>
+</html>
