@@ -670,8 +670,29 @@ class App {
 
   destroyReader() {
     this.pdfDoc = null;
+    // Убираем PDF-свайп листенеры
     const body = document.getElementById('reader-body');
+    if (this._pdfSwipeStart) body.removeEventListener('touchstart', this._pdfSwipeStart);
+    if (this._pdfSwipeEnd)   body.removeEventListener('touchend',   this._pdfSwipeEnd);
+    this._pdfSwipeStart = null;
+    this._pdfSwipeEnd   = null;
     body.innerHTML = `<div class="loading" id="reader-loading"><div class="spinner"></div><span>Загрузка…</span></div>`;
+  }
+
+  // Универсальная конвертация в ArrayBuffer (Safari IndexedDB может вернуть другой тип)
+  async _toArrayBuffer(buf) {
+    if (buf instanceof ArrayBuffer) return buf;
+    if (ArrayBuffer.isView(buf)) return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+    if (buf instanceof Blob) {
+      if (typeof buf.arrayBuffer === 'function') return buf.arrayBuffer();
+      return new Promise((res, rej) => {
+        const fr = new FileReader();
+        fr.onload  = () => res(fr.result);
+        fr.onerror = () => rej(fr.error);
+        fr.readAsArrayBuffer(buf);
+      });
+    }
+    return buf;
   }
 
   // ── EPUB RENDERER ─────────────────────────────────────────
@@ -745,6 +766,17 @@ class App {
       if (e.key === '+' || e.key === '=') document.getElementById('pdf-zoom-in')?.click();
       if (e.key === '-') document.getElementById('pdf-zoom-out')?.click();
     });
+
+    // Свайп пальцем (iPad) для перелистывания страниц PDF
+    let _swipeX = 0;
+    const readerBody = document.getElementById('reader-body');
+    readerBody.addEventListener('touchstart', this._pdfSwipeStart = (e) => {
+      _swipeX = e.touches[0].clientX;
+    }, { passive: true });
+    readerBody.addEventListener('touchend', this._pdfSwipeEnd = (e) => {
+      const dx = e.changedTouches[0].clientX - _swipeX;
+      if (Math.abs(dx) > 50) this.changePDFPage(dx < 0 ? 1 : -1);
+    }, { passive: true });
 
     // Text selection
     container.addEventListener('mouseup', () => this._handleTextSelection(null));
@@ -845,7 +877,9 @@ class App {
     if (!html && book.format === 'epub') {
       const loadingEl = document.getElementById('reader-loading');
       if (loadingEl) loadingEl.querySelector('span').textContent = 'Разбираю EPUB…';
-      const parsed = await parseEPUBNative(book.content);
+      // Конвертируем в ArrayBuffer — Safari/IndexedDB иногда возвращает другой тип
+      const epubBuf = await this._toArrayBuffer(book.content);
+      const parsed = await parseEPUBNative(epubBuf);
       html = parsed.html;
       await this.db.updateBook(book.id, {
         html, title: parsed.title, author: parsed.author, coverUrl: parsed.coverUrl
@@ -888,6 +922,12 @@ class App {
     // Selection
     div.addEventListener('mouseup', (e) => this._handleTextSelection(e));
     div.addEventListener('touchend', (e) => setTimeout(() => this._handleTextSelection(e), 200));
+
+    // Скрываем стандартное iOS-меню (Copy / Writing Tools) при выделении текста
+    div.addEventListener('contextmenu', (e) => {
+      const sel = window.getSelection();
+      if (sel && !sel.isCollapsed) e.preventDefault();
+    });
 
     document.getElementById('reader-footer').style.display = 'flex';
     this.updateProgress(savedPct);
@@ -1669,7 +1709,7 @@ tags:
     if (files.length === 0) {
       container.innerHTML = `<div class="dbx-empty">
         Папка /Читалка пуста или не существует.<br>
-        Добавь книги в папку <strong>/Читалка</strong> в своём Dropbox.
+        Добавь книги в папку <strong>/chitalka</strong> в своём Dropbox.
       </div>`;
       return;
     }
@@ -1747,6 +1787,12 @@ tags:
 
   // ── EVENT BINDINGS ────────────────────────────────────────
   bindEvents() {
+    // Безопасный addEventListener — не крашит если элемент отсутствует
+    const on = (id, event, handler, opts) => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener(event, handler, opts);
+    };
+
     // Library: add book
     document.getElementById('add-book-btn').addEventListener('click', () => {
       document.getElementById('file-input').click();
@@ -1775,7 +1821,7 @@ tags:
     });
 
     // Reader: back
-    document.getElementById('back-btn').addEventListener('click', () => {
+    on('back-btn', 'click', () => {
       this.destroyReader();
       this.currentBook = null;
       this.showScreen('library');
@@ -1787,20 +1833,20 @@ tags:
     });
 
     // Reader: settings
-    document.getElementById('reader-settings-btn').addEventListener('click', () => this.openSettings());
-    document.getElementById('global-settings-btn').addEventListener('click', () => this.openSettings());
+    on('reader-settings-btn', 'click', () => this.openSettings());
+    on('global-settings-btn', 'click',  () => this.openSettings());
 
     // Reader: annotations
-    document.getElementById('annotations-btn').addEventListener('click', () => this.openAnnotationsPanel());
+    on('annotations-btn', 'click', () => this.openAnnotationsPanel());
 
     // Overlay closes panels
-    document.getElementById('overlay').addEventListener('click', () => {
+    on('overlay', 'click', () => {
       this.closeAnnotationsPanel();
       this.closeSettings();
     });
 
     // Settings panel close on backdrop
-    document.getElementById('settings-panel').addEventListener('click', (e) => {
+    on('settings-panel', 'click', (e) => {
       if (e.target === document.getElementById('settings-panel')) this.closeSettings();
     });
 
@@ -1810,18 +1856,14 @@ tags:
     );
 
     // Font size
-    document.getElementById('font-minus').addEventListener('click', () => this.changeFontSize(-1));
-    document.getElementById('font-plus').addEventListener('click', () => this.changeFontSize(1));
-    document.getElementById('lh-minus').addEventListener('click', () => this.changeLineHeight(-0.1));
-    document.getElementById('lh-plus').addEventListener('click', () => this.changeLineHeight(0.1));
+    on('font-minus', 'click', () => this.changeFontSize(-1));
+    on('font-plus',  'click', () => this.changeFontSize(1));
+    on('lh-minus',   'click', () => this.changeLineHeight(-0.1));
+    on('lh-plus',    'click', () => this.changeLineHeight(0.1));
 
-    // Selection bar: Highlight
-    document.getElementById('highlight-btn').addEventListener('click', () => {
-      this.saveAnnotation('highlight');
-    });
-
-    // Selection bar: Note
-    document.getElementById('note-btn').addEventListener('click', () => {
+    // Selection bar
+    on('highlight-btn', 'click', () => this.saveAnnotation('highlight'));
+    on('note-btn', 'click', () => {
       if (!this.pendingSelection) return;
       document.getElementById('note-quote-preview').textContent = this.pendingSelection.text;
       document.getElementById('note-textarea').value = '';
@@ -1835,20 +1877,17 @@ tags:
       document.getElementById('note-modal').classList.remove('open');
       this.pendingSelection = null;
     };
-    document.getElementById('note-modal-close').addEventListener('click', closeNoteModal);
-    document.getElementById('note-cancel').addEventListener('click', closeNoteModal);
-    document.getElementById('note-modal').addEventListener('click', (e) => {
+    on('note-modal-close', 'click', closeNoteModal);
+    on('note-cancel',      'click', closeNoteModal);
+    on('note-modal',       'click', (e) => {
       if (e.target === document.getElementById('note-modal')) closeNoteModal();
     });
-
-    document.getElementById('note-save').addEventListener('click', async () => {
+    on('note-save', 'click', async () => {
       const noteText = document.getElementById('note-textarea').value.trim();
       document.getElementById('note-modal').classList.remove('open');
       await this.saveAnnotation('note', noteText);
     });
-
-    // Ctrl+Enter in textarea saves note
-    document.getElementById('note-textarea').addEventListener('keydown', (e) => {
+    on('note-textarea', 'keydown', (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
         document.getElementById('note-save').click();
       }
@@ -1856,56 +1895,51 @@ tags:
 
     // Hide selection bar on click elsewhere
     document.addEventListener('mousedown', (e) => {
-      if (!e.target.closest('#selection-bar')) {
-        this.hideSelectionBar();
-      }
+      if (!e.target.closest('#selection-bar')) this.hideSelectionBar();
     });
     document.addEventListener('touchstart', (e) => {
-      if (!e.target.closest('#selection-bar')) {
-        this.hideSelectionBar();
-      }
+      if (!e.target.closest('#selection-bar')) this.hideSelectionBar();
     }, { passive: true });
 
     // Dropbox modal (📦)
-    document.getElementById('dbx-open-btn').addEventListener('click', () => this.openDropboxModal());
-    document.getElementById('dbx-modal-close').addEventListener('click', () => this.closeDropboxModal());
-    document.getElementById('dbx-login-btn').addEventListener('click', () => this.startDropboxLogin());
-    document.getElementById('dbx-disconnect-btn').addEventListener('click', () => this.disconnectDropbox());
-    document.getElementById('dbx-refresh-btn').addEventListener('click', () => this.loadDropboxBooks());
-    document.getElementById('dbx-copy-uri-btn').addEventListener('click', () => {
-      const uri = document.getElementById('dbx-redirect-uri').textContent;
+    on('dbx-open-btn',      'click', () => this.openDropboxModal());
+    on('dbx-modal-close',   'click', () => this.closeDropboxModal());
+    on('dbx-login-btn',     'click', () => this.startDropboxLogin());
+    on('dbx-disconnect-btn','click', () => this.disconnectDropbox());
+    on('dbx-refresh-btn',   'click', () => this.loadDropboxBooks());
+    on('dbx-copy-uri-btn',  'click', () => {
+      const uri = document.getElementById('dbx-redirect-uri')?.textContent || '';
       navigator.clipboard?.writeText(uri).then(() => this.showToast('URI скопирован ✓'))
         .catch(() => this.showToast('Скопируй вручную: ' + uri));
     });
-    document.getElementById('dbx-modal').addEventListener('click', (e) => {
+    on('dbx-modal', 'click', (e) => {
       if (e.target === document.getElementById('dbx-modal')) this.closeDropboxModal();
     });
 
-    // Sync modal (☁️ Supabase)
-    document.getElementById('sync-open-btn').addEventListener('click', () => this.openSyncModal());
-    document.getElementById('sync-modal-close').addEventListener('click', () => this.closeSyncModal());
-    document.getElementById('sync-connect-btn').addEventListener('click', () => this.connectSync());
-    document.getElementById('sync-disconnect-btn').addEventListener('click', () => this.disconnectSync());
-    // Close sync modal on backdrop click
-    document.getElementById('sync-modal').addEventListener('click', (e) => {
+    // Sync modal (☁️)
+    on('sync-open-btn',       'click', () => this.openSyncModal());
+    on('sync-modal-close',    'click', () => this.closeSyncModal());
+    on('sync-connect-btn',    'click', () => this.connectSync());
+    on('sync-disconnect-btn', 'click', () => this.disconnectSync());
+    on('sync-modal',          'click', (e) => {
       if (e.target === document.getElementById('sync-modal')) this.closeSyncModal();
     });
 
     // Annotations panel
-    document.getElementById('sync-obsidian-btn').addEventListener('click', () => this.manualSyncObsidian());
-    document.getElementById('obsidian-setup-btn').addEventListener('click', () => this.setupObsidian());
-    document.getElementById('obsidian-global-btn').addEventListener('click', () => this.setupObsidian());
+    on('sync-obsidian-btn',  'click', () => this.manualSyncObsidian());
+    on('obsidian-setup-btn', 'click', () => this.setupObsidian());
+    on('obsidian-global-btn','click', () => this.setupObsidian());
 
     // Sync settings UI on open
-    document.getElementById('reader-settings-btn').addEventListener('click', () => this.syncSettingsUI());
-    document.getElementById('global-settings-btn').addEventListener('click', () => this.syncSettingsUI());
+    on('reader-settings-btn', 'click', () => this.syncSettingsUI());
+    on('global-settings-btn', 'click', () => this.syncSettingsUI());
 
-    // Swipe navigation for EPUB (horizontal)
+    // Swipe / touch navigation
     let touchStartX = 0;
-    document.getElementById('reader-body').addEventListener('touchstart', (e) => {
+    on('reader-body', 'touchstart', (e) => {
       touchStartX = e.touches[0].clientX;
     }, { passive: true });
-    document.getElementById('reader-body').addEventListener('touchend', () => {}, { passive: true });
+    on('reader-body', 'touchend', () => {}, { passive: true });
   }
 }
 

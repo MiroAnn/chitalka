@@ -291,6 +291,7 @@ html, body {
 .text-content {
   height: 100%;
   overflow-y: auto;
+  overflow-x: hidden;          /* запрет горизонтального скролла */
   padding: 28px 24px 60px;
   -webkit-overflow-scrolling: touch;
   font-family: var(--font-read);
@@ -299,6 +300,9 @@ html, body {
   color: var(--text);
   max-width: calc(var(--max-width) + 48px);
   margin: 0 auto;
+  word-break: break-word;      /* перенос длинных слов */
+  overflow-wrap: break-word;
+  -webkit-touch-callout: none; /* убираем iOS callout при долгом нажатии */
 }
 
 .text-content p {
