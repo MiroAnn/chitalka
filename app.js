@@ -466,7 +466,9 @@ class App {
     this.syncReady = false;
 
     // Dropbox
-    this.dropbox = null;      // DropboxSync instance
+    this.dropbox = null;          // DropboxSync instance
+    this._downloadingPaths = new Set(); // пути файлов которые сейчас скачиваются
+    this._autoSyncing = false;    // флаг чтобы не запускать два автосинка сразу
   }
 
   // ── INIT ──────────────────────────────────────────────────
@@ -475,6 +477,7 @@ class App {
     await this.loadSettings();
     this.applyTheme();
     this.bindEvents();
+    this.updateObsidianUI(); // адаптируем кнопку под Mac / iPad сразу
     this.registerSW();
     await this.initSync();
 
@@ -586,12 +589,22 @@ class App {
   // ── ADD BOOK ──────────────────────────────────────────────
   async addBooks(files) {
     let added = 0;
+    // Получаем список уже добавленных имён файлов чтобы не дублировать
+    const existingBooks = await this.db.getAllBooks();
+    const existingNames = new Set(existingBooks.map(b => b.sourceFileName).filter(Boolean));
+
     for (const file of files) {
       const ext = file.name.split('.').pop().toLowerCase();
       if (!['epub','pdf','txt','fb2'].includes(ext)) {
         this.showToast(`${file.name}: формат не поддерживается`);
         continue;
       }
+      // Пропускаем если файл с таким именем уже есть
+      if (existingNames.has(file.name)) {
+        this.showToast(`«${file.name}» уже в библиотеке`);
+        continue;
+      }
+      existingNames.add(file.name); // на случай если один файл добавляется дважды за раз
       this.showToast('Добавляем ' + file.name + '…');
       try {
         const buf = await file.arrayBuffer();
@@ -610,15 +623,16 @@ class App {
         // pdf: just store, title = filename
 
         await this.db.addBook({
-          title: meta.title,
-          author: meta.author || '',
-          format: ext,
-          content: buf,
-          coverUrl: meta.coverUrl || null,
-          html: meta.html || null,
-          progress: 0,
-          addedAt: Date.now(),
-          lastRead: null,
+          title:          meta.title,
+          author:         meta.author || '',
+          format:         ext,
+          content:        buf,
+          coverUrl:       meta.coverUrl || null,
+          html:           meta.html || null,
+          progress:       0,
+          addedAt:        Date.now(),
+          lastRead:       null,
+          sourceFileName: file.name,
         });
         added++;
       } catch (err) {
@@ -1046,6 +1060,12 @@ class App {
       range: savedRange,
       context: { type: this.currentBook?.format || 'text' }
     };
+
+    // Снимаем нативное выделение ДО показа нашей панели —
+    // iOS не может показать меню «Copy / Writing Tools» если выделения нет.
+    // Сохранённый range остаётся у нас для последующего применения highlight.
+    try { window.getSelection()?.removeAllRanges(); } catch {}
+
     this.showSelectionBar(x, y);
   }
 
@@ -1171,9 +1191,15 @@ class App {
   }
 
   // ── OBSIDIAN SYNC ─────────────────────────────────────────
+  get _isIOS() {
+    return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+           (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  }
+
   async setupObsidian() {
-    if (!window.showDirectoryPicker) {
-      this.showToast('File System API недоступен в этом браузере. Используй Chrome на Mac.');
+    if (this._isIOS || !window.showDirectoryPicker) {
+      // На iPad/iPhone — показываем меню с вариантами поделиться
+      this._showIOSObsidianMenu();
       return;
     }
     try {
@@ -1187,16 +1213,71 @@ class App {
     }
   }
 
+  _showIOSObsidianMenu() {
+    if (!this.currentBook) {
+      this.showToast('Открой книгу, чтобы экспортировать заметки');
+      return;
+    }
+    const md = this.generateObsidianMD(this.currentBook, this.currentAnnotations);
+    const name = (this.currentBook.title || 'книга')
+      .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(0, 80) + '.md';
+
+    // Пробуем Web Share API с файлом (поддерживается iOS 15+)
+    const tryShare = async () => {
+      try {
+        const file = new File([md], name, { type: 'text/markdown' });
+        if (navigator.share && navigator.canShare?.({ files: [file] })) {
+          await navigator.share({ title: this.currentBook.title, files: [file] });
+          return true;
+        }
+      } catch (e) {
+        if (e.name === 'AbortError') return true; // пользователь отменил — ок
+      }
+      return false;
+    };
+
+    // Пробуем скопировать в буфер
+    const tryCopy = async () => {
+      try {
+        await navigator.clipboard.writeText(md);
+        this.showToast('📋 Markdown скопирован — вставь в Obsidian');
+        return true;
+      } catch { return false; }
+    };
+
+    // Пробуем открыть через obsidian:// URI
+    const tryObsidianURI = () => {
+      const encoded = encodeURIComponent(md);
+      if (encoded.length > 10000) return false; // слишком длинный для URI
+      const encodedName = encodeURIComponent(name.replace('.md', ''));
+      window.location.href = `obsidian://new?name=${encodedName}&content=${encoded}`;
+      return true;
+    };
+
+    // Последовательно пробуем варианты
+    tryShare().then(ok => {
+      if (!ok) return tryCopy();
+    }).then(ok => {
+      if (ok === false) tryObsidianURI();
+    });
+  }
+
   updateObsidianUI() {
-    const path = document.getElementById('obsidian-path');
+    const path  = document.getElementById('obsidian-path');
     const setup = document.getElementById('obsidian-setup-btn');
+    if (this._isIOS || !window.showDirectoryPicker) {
+      // На iPad показываем кнопку «Поделиться»
+      path.style.display = 'none';
+      if (setup) setup.textContent = '📤 Поделиться / Открыть в Obsidian';
+      return;
+    }
     if (this.obsidianDirName) {
       path.textContent = '📂 ' + this.obsidianDirName;
       path.style.display = 'block';
-      setup.textContent = '🔮 Сменить папку vault';
+      if (setup) setup.textContent = '🔮 Сменить папку vault';
     } else {
       path.style.display = 'none';
-      setup.textContent = '🔮 Указать папку Obsidian vault';
+      if (setup) setup.textContent = '🔮 Указать папку Obsidian vault';
     }
   }
 
@@ -1278,6 +1359,12 @@ tags:
   }
 
   async manualSyncObsidian() {
+    // На iPad — показываем меню «Поделиться / Скопировать / Открыть в Obsidian»
+    if (this._isIOS || !window.showDirectoryPicker) {
+      this._showIOSObsidianMenu();
+      return;
+    }
+
     if (!this.obsidianDir) {
       await this.setupObsidian();
       if (!this.obsidianDir) return;
@@ -1563,20 +1650,31 @@ tags:
 
   // Automatically download books from Dropbox that aren't in the local library yet
   async _autoSyncDropbox() {
-    if (!this.dropbox) return;
+    if (!this.dropbox || this._autoSyncing) return;
+    this._autoSyncing = true;
     try {
       const [remoteFiles, localBooks] = await Promise.all([
         this.dropbox.listBooks(),
         this.db.getAllBooks(),
       ]);
       const localPaths = new Set(localBooks.map(b => b.dropboxPath).filter(Boolean));
-      const newFiles = remoteFiles.filter(f => !localPaths.has(f.path));
+
+      // Исключаем файлы которые уже скачиваются вручную через модал
+      const newFiles = remoteFiles.filter(f =>
+        !localPaths.has(f.path) && !this._downloadingPaths.has(f.path)
+      );
       if (newFiles.length === 0) return;
 
       this.showToast(`📦 Скачиваем ${newFiles.length} ${this._pluralBooks(newFiles.length)} из Dropbox…`, 4000);
 
       let added = 0;
       for (const f of newFiles) {
+        // Перепроверяем перед каждой загрузкой — вдруг уже добавили за это время
+        if (this._downloadingPaths.has(f.path)) continue;
+        const freshBooks = await this.db.getAllBooks();
+        const freshPaths = new Set(freshBooks.map(b => b.dropboxPath).filter(Boolean));
+        if (freshPaths.has(f.path)) continue;
+
         try {
           const buf = await this.dropbox.downloadFile(f.path);
           const ext = f.ext;
@@ -1598,7 +1696,7 @@ tags:
             dropboxPath: f.path,
           });
           added++;
-        } catch { /* skip individual failures silently */ }
+        } catch { /* пропускаем отдельные ошибки */ }
       }
 
       if (added > 0) {
@@ -1606,8 +1704,9 @@ tags:
         this.showToast(`✓ Добавлено ${added} ${this._pluralBooks(added)} из Dropbox`);
       }
     } catch (e) {
-      // Показываем ошибку, но не крашим приложение
       this.showToast('📦 Dropbox: ' + e.message.slice(0, 80), 5000);
+    } finally {
+      this._autoSyncing = false;
     }
   }
 
@@ -1750,6 +1849,8 @@ tags:
     const path     = btn.dataset.path;
     const fileName = btn.dataset.name;
 
+    // Отмечаем путь как «скачивается» — автосинк пропустит этот файл
+    this._downloadingPaths.add(path);
     btn.textContent = '⏳'; btn.disabled = true;
 
     try {
@@ -1782,6 +1883,9 @@ tags:
       btn.textContent = 'Скачать';
       btn.disabled = false;
       this.showToast('Ошибка: ' + (e.message || String(e)), 5000);
+    } finally {
+      // Снимаем метку в любом случае
+      this._downloadingPaths.delete(path);
     }
   }
 
