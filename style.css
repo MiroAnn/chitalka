@@ -421,8 +421,21 @@ mark.reader-highlight:hover { background: rgba(255, 180, 50, 0.55); }
   color: var(--bar-text);
   cursor: pointer;
   font-size: 18px; padding: 0 4px;
+  transition: opacity 0.15s;
 }
+.pdf-nav button:hover { opacity: 0.7; }
 .pdf-nav button:disabled { opacity: 0.3; cursor: default; }
+.pdf-nav-sep {
+  width: 1px; height: 18px;
+  background: rgba(255,255,255,0.25);
+  margin: 0 4px;
+}
+#pdf-zoom-label {
+  font-size: 12px;
+  min-width: 38px;
+  text-align: center;
+}
+#pdf-zoom-fit { font-size: 14px; }
 
 /* Reader footer progress */
 .reader-footer {

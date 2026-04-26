@@ -267,6 +267,7 @@ class App {
     this.pdfDoc = null;
     this.pdfCurrentPage = 1;
     this.pdfTotalPages = 0;
+    this.pdfZoom = 1.0; // multiplier on top of fit-page scale
 
     // Selection state
     this.pendingSelection = null; // { text, context }
@@ -580,6 +581,7 @@ class App {
     this.pdfCurrentPage = Math.max(1,
       Math.round((book.progress || 0) * this.pdfTotalPages) || 1
     );
+    this.pdfZoom = 1.0;
 
     const body = document.getElementById('reader-body');
     body.innerHTML = '';
@@ -591,20 +593,46 @@ class App {
     const nav = document.createElement('div');
     nav.className = 'pdf-nav';
     nav.innerHTML = `
-      <button id="pdf-prev">‹</button>
+      <button id="pdf-prev" title="Предыдущая">‹</button>
       <span id="pdf-page-info">${this.pdfCurrentPage} / ${this.pdfTotalPages}</span>
-      <button id="pdf-next">›</button>
+      <button id="pdf-next" title="Следующая">›</button>
+      <div class="pdf-nav-sep"></div>
+      <button id="pdf-zoom-out" title="Уменьшить">−</button>
+      <span id="pdf-zoom-label">100%</span>
+      <button id="pdf-zoom-in" title="Увеличить">+</button>
+      <button id="pdf-zoom-fit" title="По странице">⊡</button>
     `;
     body.appendChild(nav);
 
+    // Ждём layout перед первым рендером, чтобы clientWidth был правильным
+    await new Promise(r => requestAnimationFrame(r));
     await this.renderPDFPage(container, this.pdfCurrentPage);
 
     document.getElementById('pdf-prev').addEventListener('click', () => this.changePDFPage(-1));
     document.getElementById('pdf-next').addEventListener('click', () => this.changePDFPage(1));
+
+    document.getElementById('pdf-zoom-in').addEventListener('click', () => {
+      this.pdfZoom = Math.min(4.0, Math.round((this.pdfZoom + 0.25) * 100) / 100);
+      this._updatePDFZoomLabel();
+      this.renderPDFPage(container, this.pdfCurrentPage);
+    });
+    document.getElementById('pdf-zoom-out').addEventListener('click', () => {
+      this.pdfZoom = Math.max(0.25, Math.round((this.pdfZoom - 0.25) * 100) / 100);
+      this._updatePDFZoomLabel();
+      this.renderPDFPage(container, this.pdfCurrentPage);
+    });
+    document.getElementById('pdf-zoom-fit').addEventListener('click', () => {
+      this.pdfZoom = 1.0;
+      this._updatePDFZoomLabel();
+      this.renderPDFPage(container, this.pdfCurrentPage);
+    });
+
     document.addEventListener('keyup', this._pdfKeyHandler = (e) => {
       if (this.currentBook?.format !== 'pdf') return;
       if (e.key === 'ArrowRight' || e.key === 'ArrowDown') this.changePDFPage(1);
       if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') this.changePDFPage(-1);
+      if (e.key === '+' || e.key === '=') document.getElementById('pdf-zoom-in')?.click();
+      if (e.key === '-') document.getElementById('pdf-zoom-out')?.click();
     });
 
     // Text selection
@@ -616,14 +644,28 @@ class App {
     this.updateProgress(pct);
   }
 
+  _updatePDFZoomLabel() {
+    const el = document.getElementById('pdf-zoom-label');
+    if (el) el.textContent = Math.round(this.pdfZoom * 100) + '%';
+  }
+
   async renderPDFPage(container, pageNum) {
     container.innerHTML = '';
     const page = await this.pdfDoc.getPage(pageNum);
 
-    const viewport = page.getViewport({ scale: Math.min(
-      (container.clientWidth || window.innerWidth - 40) / page.getViewport({ scale: 1 }).width,
-      2.0
-    ) });
+    // Fit the whole page (width AND height) then apply zoom multiplier
+    const page1 = page.getViewport({ scale: 1 });
+    const padH = 48; // top+bottom padding inside container
+    const navH = 56; // nav bar height
+    const containerW = container.clientWidth || (window.innerWidth - 32);
+    const containerH = container.clientHeight || (window.innerHeight - 120 - navH);
+
+    const scaleW = (containerW - 32) / page1.width;
+    const scaleH = (containerH - padH) / page1.height;
+    const fitScale = Math.min(scaleW, scaleH);
+    const scale = Math.max(0.1, fitScale * this.pdfZoom);
+
+    const viewport = page.getViewport({ scale });
 
     const wrapper = document.createElement('div');
     wrapper.className = 'pdf-page-wrapper';
