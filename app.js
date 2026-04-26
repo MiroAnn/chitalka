@@ -2377,15 +2377,13 @@ tags:
     document.addEventListener('touchend', (e) => {
       if (e.target.closest('#selection-bar')) return;
       if (document.getElementById('note-modal')?.classList.contains('open')) return;
+      // Если pendingSelection установлен — наша панель активна, не трогаем её
+      if (this.pendingSelection) return;
       setTimeout(() => {
-        const bar = document.getElementById('selection-bar');
-        if (bar && bar.style.display !== 'flex') return; // уже скрыт
-        // Если нет активного нативного выделения (и модалка закрыта) — скрываем
         const sel = window.getSelection();
         if (!sel || sel.isCollapsed) {
           this._removePendingSelectionMark();
           this.hideSelectionBar();
-          this.pendingSelection = null;
         }
       }, 100);
     }, { passive: true });
