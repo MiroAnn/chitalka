@@ -291,18 +291,37 @@ class DropboxSync {
     } catch { return false; }
   }
 
-  // ── Список книг из папки /Читалка ─────────────────────────
+  // ── Список книг из папки /Читалка (с fallback на корень) ──
   async listBooks() {
+    // Пробуем /Читалка; если 400 (App Folder или недопустимый путь) — пробуем корень
+    const entries = await this._listFolder(this.folder);
+    if (entries !== null) return this._filterBookEntries(entries);
+
+    const rootEntries = await this._listFolder('');
+    if (rootEntries !== null) return this._filterBookEntries(rootEntries);
+
+    throw new Error('Не удалось получить список книг. Проверь тип приложения Dropbox: нужен Full Dropbox (или книги в корне App Folder).');
+  }
+
+  // Возвращает entries[] или null если путь недоступен (400), бросает при сетевых ошибках
+  async _listFolder(path) {
     const res = await this._fetch('https://api.dropboxapi.com/2/files/list_folder', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: this.folder, recursive: false }),
+      body: JSON.stringify({ path, recursive: false }),
     });
-    if (res.status === 409) return []; // папка не существует ещё
-    if (!res.ok) throw new Error(`Dropbox error ${res.status}`);
+    if (res.status === 409) return []; // путь не найден — папка пуста или не создана
+    if (res.status === 400) return null; // недопустимый путь — попробуем другой
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(`Dropbox error ${res.status}: ${errText.slice(0, 120)}`);
+    }
     const data = await res.json();
+    return data.entries || [];
+  }
 
-    return (data.entries || [])
+  _filterBookEntries(entries) {
+    return entries
       .filter(e => e['.tag'] === 'file')
       .filter(e => ['epub','pdf','txt','fb2'].includes(e.name.split('.').pop().toLowerCase()))
       .map(e => ({

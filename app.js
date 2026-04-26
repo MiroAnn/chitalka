@@ -1505,8 +1505,73 @@ tags:
     if (cfg?.accessToken) {
       this.dropbox = new DropboxSync(cfg.accessToken, cfg.refreshToken || null, cfg.clientId || null);
       const ok = await this.dropbox.ping();
-      if (!ok) this.dropbox = null; // token expired and refresh failed — will need re-login
+      if (!ok) {
+        this.dropbox = null; // token expired and refresh failed — will need re-login
+        return;
+      }
+      // Auto-sync new books from Dropbox on startup
+      this._autoSyncDropbox();
     }
+
+    // Re-check when the tab/app becomes visible again (e.g. after switching devices)
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && this.dropbox) {
+        this._autoSyncDropbox();
+      }
+    });
+  }
+
+  // Automatically download books from Dropbox that aren't in the local library yet
+  async _autoSyncDropbox() {
+    if (!this.dropbox) return;
+    try {
+      const [remoteFiles, localBooks] = await Promise.all([
+        this.dropbox.listBooks(),
+        this.db.getAllBooks(),
+      ]);
+      const localPaths = new Set(localBooks.map(b => b.dropboxPath).filter(Boolean));
+      const newFiles = remoteFiles.filter(f => !localPaths.has(f.path));
+      if (newFiles.length === 0) return;
+
+      this.showToast(`📦 Скачиваем ${newFiles.length} ${this._pluralBooks(newFiles.length)} из Dropbox…`, 4000);
+
+      let added = 0;
+      for (const f of newFiles) {
+        try {
+          const buf = await this.dropbox.downloadFile(f.path);
+          const ext = f.ext;
+          let meta = { title: f.name.replace(/\.[^.]+$/, ''), author: '', coverUrl: null, html: null };
+          if (ext === 'txt')  { const p = parseTXT(buf);              meta = { ...meta, ...p }; }
+          if (ext === 'fb2')  { const p = parseFB2(buf);              meta = { ...meta, ...p }; }
+          if (ext === 'epub') { const p = await parseEPUBNative(buf); meta = { ...meta, ...p }; }
+
+          await this.db.addBook({
+            title:       meta.title,
+            author:      meta.author || '',
+            format:      ext,
+            content:     buf,
+            coverUrl:    meta.coverUrl || null,
+            html:        meta.html || null,
+            progress:    0,
+            addedAt:     Date.now(),
+            lastRead:    null,
+            dropboxPath: f.path,
+          });
+          added++;
+        } catch { /* skip individual failures silently */ }
+      }
+
+      if (added > 0) {
+        await this.renderLibrary();
+        this.showToast(`✓ Добавлено ${added} ${this._pluralBooks(added)} из Dropbox`);
+      }
+    } catch { /* network error — ignore */ }
+  }
+
+  _pluralBooks(n) {
+    if (n % 10 === 1 && n % 100 !== 11) return 'книга';
+    if ([2,3,4].includes(n % 10) && ![12,13,14].includes(n % 100)) return 'книги';
+    return 'книг';
   }
 
   openDropboxModal() {
