@@ -177,114 +177,152 @@ class SyncClient {
   }
 }
 
-// ── BASE64 HELPER ─────────────────────────────────────────────
-function _b64ToArrayBuffer(b64) {
-  const binary = atob(b64);
-  const bytes  = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes.buffer;
+// ── DROPBOX SYNC ──────────────────────────────────────────────
+
+// PKCE helpers
+function _dbxVerifier() {
+  const arr = new Uint8Array(32);
+  crypto.getRandomValues(arr);
+  return btoa(String.fromCharCode(...arr)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'');
+}
+async function _dbxChallenge(verifier) {
+  const data = new TextEncoder().encode(verifier);
+  const hash = await crypto.subtle.digest('SHA-256', data);
+  return btoa(String.fromCharCode(...new Uint8Array(hash))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'');
 }
 
-// ── TELEGRAM SYNC ─────────────────────────────────────────────
-class TelegramSync {
-  // proxyUrl: Cloudflare Worker URL — нужен на iPhone/Safari из-за CORS
-  constructor(botToken, proxyUrl = null) {
-    this.token    = botToken;
-    this.proxyUrl = proxyUrl ? proxyUrl.replace(/\/$/, '') : null;
+class DropboxSync {
+  constructor(accessToken, refreshToken = null, clientId = null) {
+    this.accessToken  = accessToken;
+    this.refreshToken = refreshToken;
+    this.clientId     = clientId;
+    this.folder       = '/Читалка';
   }
 
-  // Строим URL для Bot API — напрямую или через прокси
-  _apiUrl(path) {
-    const direct = `https://api.telegram.org/bot${this.token}${path}`;
-    return this.proxyUrl
-      ? `${this.proxyUrl}?url=${encodeURIComponent(direct)}`
-      : direct;
+  // ── Redirect URI = текущая страница без query/hash ────────
+  static getRedirectUri() {
+    return window.location.origin + window.location.pathname.replace(/\/$/, '');
   }
 
-  // Строим URL для скачивания файла
-  _fileUrl(filePath) {
-    const direct = `https://api.telegram.org/file/bot${this.token}/${filePath}`;
-    return this.proxyUrl
-      ? `${this.proxyUrl}?url=${encodeURIComponent(direct)}`
-      : direct;
+  // ── Начать OAuth (редирект на Dropbox) ───────────────────
+  static async startOAuth(clientId) {
+    const verifier  = _dbxVerifier();
+    const challenge = await _dbxChallenge(verifier);
+    sessionStorage.setItem('dbx_verifier',  verifier);
+    sessionStorage.setItem('dbx_client_id', clientId);
+
+    const params = new URLSearchParams({
+      client_id:             clientId,
+      response_type:         'code',
+      code_challenge:        challenge,
+      code_challenge_method: 'S256',
+      redirect_uri:          DropboxSync.getRedirectUri(),
+      token_access_type:     'offline',
+    });
+    window.location.href = 'https://www.dropbox.com/oauth2/authorize?' + params;
   }
 
-  // Fetch с таймаутом
-  async _tgFetch(url, opts = {}, timeoutMs = 12000) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const res = await fetch(url, { ...opts, signal: controller.signal });
-      return res;
-    } catch (e) {
-      if (e.name === 'AbortError') throw new Error('Превышено время ожидания — проверь интернет');
-      throw e;
-    } finally {
-      clearTimeout(timer);
+  // ── Завершить OAuth (обмен кода на токены) ────────────────
+  static async completeOAuth(code) {
+    const verifier  = sessionStorage.getItem('dbx_verifier');
+    const clientId  = sessionStorage.getItem('dbx_client_id');
+    sessionStorage.removeItem('dbx_verifier');
+    sessionStorage.removeItem('dbx_client_id');
+    if (!verifier || !clientId) throw new Error('OAuth-сессия устарела, попробуй снова');
+
+    const res = await fetch('https://api.dropbox.com/oauth2/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code,
+        grant_type:    'authorization_code',
+        client_id:     clientId,
+        redirect_uri:  DropboxSync.getRedirectUri(),
+        code_verifier: verifier,
+      }),
+    });
+    const data = await res.json();
+    if (!data.access_token) throw new Error(data.error_description || 'OAuth ошибка');
+    return { clientId, accessToken: data.access_token, refreshToken: data.refresh_token };
+  }
+
+  // ── Обновить access token через refresh token ─────────────
+  async _refresh() {
+    if (!this.refreshToken || !this.clientId) throw new Error('Нет refresh token — войди заново');
+    const res = await fetch('https://api.dropbox.com/oauth2/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type:    'refresh_token',
+        refresh_token: this.refreshToken,
+        client_id:     this.clientId,
+      }),
+    });
+    const data = await res.json();
+    if (!data.access_token) throw new Error('Не удалось обновить токен — войди заново');
+    this.accessToken = data.access_token;
+  }
+
+  // ── Универсальный fetch с авто-рефрешем ──────────────────
+  async _fetch(url, opts = {}) {
+    const makeReq = () => fetch(url, {
+      ...opts,
+      headers: { 'Authorization': `Bearer ${this.accessToken}`, ...opts.headers },
+    });
+    let res = await makeReq();
+    if (res.status === 401) {
+      await this._refresh();
+      res = await makeReq();
     }
+    return res;
   }
 
-  // Проверка токена
+  // ── Проверка соединения ───────────────────────────────────
   async ping() {
     try {
-      const res = await this._tgFetch(this._apiUrl('/getMe'));
-      const data = await res.json();
-      return data.ok === true;
+      const res = await this._fetch('https://api.dropboxapi.com/2/users/get_current_account', {
+        method: 'POST',
+      });
+      if (res.ok) {
+        const data = await res.json();
+        this._accountName = data.name?.display_name || '';
+      }
+      return res.ok;
     } catch { return false; }
   }
 
-  // Список книг из последних сообщений бота
-  async fetchFileCatalog() {
-    const res = await this._tgFetch(
-      this._apiUrl('/getUpdates?limit=100&allowed_updates=%5B%22message%22%5D')
-    );
-    if (!res.ok) throw new Error('Telegram API недоступен');
+  // ── Список книг из папки /Читалка ─────────────────────────
+  async listBooks() {
+    const res = await this._fetch('https://api.dropboxapi.com/2/files/list_folder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: this.folder, recursive: false }),
+    });
+    if (res.status === 409) return []; // папка не существует ещё
+    if (!res.ok) throw new Error(`Dropbox error ${res.status}`);
     const data = await res.json();
-    if (!data.ok) throw new Error(data.description || 'Ошибка Telegram');
 
-    const seen = new Set();
-    const files = [];
-    for (const update of (data.result || [])) {
-      const doc = update.message?.document;
-      if (!doc || seen.has(doc.file_id)) continue;
-      seen.add(doc.file_id);
-      const ext = (doc.file_name || '').split('.').pop().toLowerCase();
-      if (!['epub', 'pdf', 'txt', 'fb2'].includes(ext)) continue;
-      files.push({
-        file_id:   doc.file_id,
-        file_name: doc.file_name || 'Книга.' + ext,
-        file_size: doc.file_size || 0,
-        ext,
-      });
-    }
-    return files.reverse();
+    return (data.entries || [])
+      .filter(e => e['.tag'] === 'file')
+      .filter(e => ['epub','pdf','txt','fb2'].includes(e.name.split('.').pop().toLowerCase()))
+      .map(e => ({
+        path: e.path_lower,
+        name: e.name,
+        size: e.size || 0,
+        ext:  e.name.split('.').pop().toLowerCase(),
+        id:   e.id,
+      }));
   }
 
-  // Скачать файл по file_id → ArrayBuffer
-  async downloadFile(file_id) {
-    const r1 = await this._tgFetch(this._apiUrl(`/getFile?file_id=${encodeURIComponent(file_id)}`));
-    if (!r1.ok) throw new Error('Ошибка получения файла');
-    const j1 = await r1.json();
-    if (!j1.ok || !j1.result?.file_path) {
-      throw new Error('Файл недоступен — возможно, он больше 20 МБ');
-    }
-    const r2 = await this._tgFetch(this._fileUrl(j1.result.file_path), {}, 60000);
-    if (!r2.ok) {
-      const hint = this.proxyUrl ? '' : ' — добавь Proxy URL';
-      throw new Error(`Ошибка скачивания (${r2.status})${hint}`);
-    }
-
-    if (this.proxyUrl) {
-      // Прокси возвращает base64 JSON — Safari пропускает текст без проблем
-      const json = await r2.json();
-      if (json.error) throw new Error('Прокси: ' + json.error);
-      if (!json.b64)  throw new Error('Прокси не вернул данные файла');
-      return _b64ToArrayBuffer(json.b64);
-    } else {
-      // Прямое скачивание (Chrome/Mac) — blob надёжнее arrayBuffer
-      const blob = await r2.blob();
-      return blob.arrayBuffer();
-    }
+  // ── Скачать файл → ArrayBuffer ────────────────────────────
+  async downloadFile(path) {
+    const res = await this._fetch('https://content.dropboxapi.com/2/files/download', {
+      method: 'POST',
+      headers: { 'Dropbox-API-Arg': JSON.stringify({ path }) },
+    });
+    if (!res.ok) throw new Error(`Ошибка скачивания (${res.status})`);
+    const blob = await res.blob();
+    return blob.arrayBuffer();
   }
 
   static formatSize(bytes) {

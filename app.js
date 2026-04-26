@@ -465,10 +465,8 @@ class App {
     this.sync = null;         // SyncClient instance
     this.syncReady = false;
 
-    // Telegram
-    this.telegram   = null;   // TelegramSync instance
-    this.tgBotName  = '';
-    this.tgProxyUrl = '';     // CORS proxy для iPhone/Safari
+    // Dropbox
+    this.dropbox = null;      // DropboxSync instance
   }
 
   // ── INIT ──────────────────────────────────────────────────
@@ -479,7 +477,16 @@ class App {
     this.bindEvents();
     this.registerSW();
     await this.initSync();
-    await this.initTelegram();
+
+    // Detect Dropbox OAuth callback (?code=...)
+    const _urlParams = new URLSearchParams(window.location.search);
+    const _oauthCode = _urlParams.get('code');
+    if (_oauthCode) {
+      history.replaceState({}, '', window.location.pathname);
+      await this._completeDropboxOAuth(_oauthCode);
+    }
+    await this.initDropbox();
+
     await this.renderLibrary();
   }
 
@@ -1492,152 +1499,138 @@ tags:
     } catch {}
   }
 
-  // ── TELEGRAM ──────────────────────────────────────────────
-  async initTelegram() {
-    const cfg = await this.db.getSetting('telegramConfig', null);
-    if (cfg?.token) {
-      this.tgBotName  = cfg.botName  || '';
-      this.tgProxyUrl = cfg.proxyUrl || '';
-      this.telegram   = new TelegramSync(cfg.token, this.tgProxyUrl || null);
+  // ── DROPBOX ───────────────────────────────────────────────
+  async initDropbox() {
+    const cfg = await this.db.getSetting('dropboxConfig', null);
+    if (cfg?.accessToken) {
+      this.dropbox = new DropboxSync(cfg.accessToken, cfg.refreshToken || null, cfg.clientId || null);
+      const ok = await this.dropbox.ping();
+      if (!ok) this.dropbox = null; // token expired and refresh failed — will need re-login
     }
   }
 
-  openTelegramModal() {
-    const setup = document.getElementById('tg-setup-form');
-    const list  = document.getElementById('tg-book-list');
+  openDropboxModal() {
+    const setupForm  = document.getElementById('dbx-setup-form');
+    const connected  = document.getElementById('dbx-connected');
 
-    if (this.telegram) {
-      setup.style.display = 'none';
-      list.style.display  = 'block';
-      document.getElementById('tg-bot-name').textContent = '@' + (this.tgBotName || 'бот');
-      document.getElementById('tg-proxy-connected').value = this.tgProxyUrl || '';
-      this.loadTelegramBooks();
+    // Fill in redirect URI so user can copy it
+    document.getElementById('dbx-redirect-uri').textContent = DropboxSync.getRedirectUri();
+
+    if (this.dropbox) {
+      setupForm.style.display = 'none';
+      connected.style.display = 'block';
+      document.getElementById('dbx-account-name').textContent = this.dropbox._accountName || '';
+      this.loadDropboxBooks();
     } else {
-      setup.style.display = 'block';
-      list.style.display  = 'none';
-      document.getElementById('tg-token').value = '';
-      document.getElementById('tg-proxy').value = '';
+      setupForm.style.display = 'block';
+      connected.style.display = 'none';
+      // Pre-fill app key if saved
+      this.db.getSetting('dropboxConfig', null).then(cfg => {
+        if (cfg?.clientId) document.getElementById('dbx-app-key').value = cfg.clientId;
+      });
     }
-    document.getElementById('tg-modal').classList.add('open');
+    document.getElementById('dbx-modal').classList.add('open');
   }
 
-  closeTelegramModal() {
-    document.getElementById('tg-modal').classList.remove('open');
+  closeDropboxModal() {
+    document.getElementById('dbx-modal').classList.remove('open');
   }
 
-  async connectTelegram() {
-    const token = document.getElementById('tg-token').value.trim();
-    if (!token) { this.showToast('Введи токен бота'); return; }
+  async startDropboxLogin() {
+    const appKey = document.getElementById('dbx-app-key').value.trim();
+    if (!appKey) { this.showToast('Введи App Key'); return; }
 
-    const btn = document.getElementById('tg-connect-btn');
-    btn.textContent = 'Проверяем…'; btn.disabled = true;
+    // Save app key so we can restore it after redirect
+    await this.db.setSetting('dropboxConfig', { clientId: appKey });
 
-    let botName = '';
     try {
-      const proxyUrl = document.getElementById('tg-proxy').value.trim();
-      // Создаём клиент сразу с прокси — чтобы getMe тоже шёл через него
-      const tg = new TelegramSync(token, proxyUrl || null);
-      const res = await tg._tgFetch(tg._apiUrl('/getMe'));
-
-      let data;
-      try { data = await res.json(); } catch { throw new Error('Не удалось прочитать ответ'); }
-
-      if (!res.ok || !data.ok) {
-        throw new Error(data?.description || `Ошибка ${res.status} — проверь токен`);
-      }
-
-      botName = data.result?.username || data.result?.first_name || 'бот';
-
-      this.telegram   = tg;
-      this.tgBotName  = botName;
-      this.tgProxyUrl = proxyUrl;
-      await this.db.setSetting('telegramConfig', { token, botName, proxyUrl });
-
-      document.getElementById('tg-setup-form').style.display = 'none';
-      document.getElementById('tg-book-list').style.display  = 'block';
-      document.getElementById('tg-bot-name').textContent = '@' + botName;
-      document.getElementById('tg-proxy-connected').value = proxyUrl;
-      this.showToast('Telegram подключён ✓');
-      this.loadTelegramBooks();
-
+      await DropboxSync.startOAuth(appKey);
+      // Page will redirect — no code after this
     } catch (e) {
       this.showToast('Ошибка: ' + e.message);
-    } finally {
-      btn.textContent = 'Подключить'; btn.disabled = false;
     }
   }
 
-  async disconnectTelegram() {
-    this.telegram  = null;
-    this.tgBotName = '';
-    await this.db.setSetting('telegramConfig', null);
-    document.getElementById('tg-setup-form').style.display = 'block';
-    document.getElementById('tg-book-list').style.display  = 'none';
-    this.showToast('Telegram отключён');
+  async _completeDropboxOAuth(code) {
+    try {
+      const { clientId, accessToken, refreshToken } = await DropboxSync.completeOAuth(code);
+      await this.db.setSetting('dropboxConfig', { clientId, accessToken, refreshToken });
+      this.dropbox = new DropboxSync(accessToken, refreshToken, clientId);
+      await this.dropbox.ping(); // fetch account name
+      this.showToast('📦 Dropbox подключён ✓');
+    } catch (e) {
+      this.showToast('Ошибка входа в Dropbox: ' + e.message);
+    }
   }
 
-  async loadTelegramBooks() {
-    const container = document.getElementById('tg-books');
-    container.innerHTML = '<div class="tg-empty">Загружаем список книг…</div>';
+  async disconnectDropbox() {
+    this.dropbox = null;
+    await this.db.setSetting('dropboxConfig', null);
+    document.getElementById('dbx-setup-form').style.display = 'block';
+    document.getElementById('dbx-connected').style.display  = 'none';
+    this.showToast('Dropbox отключён');
+  }
+
+  async loadDropboxBooks() {
+    const container = document.getElementById('dbx-books');
+    container.innerHTML = '<div class="dbx-empty">Загружаем список книг…</div>';
 
     let files;
     try {
-      files = await this.telegram.fetchFileCatalog();
+      files = await this.dropbox.listBooks();
     } catch (e) {
-      container.innerHTML = `<div class="tg-empty">Ошибка: ${e.message}</div>`;
+      container.innerHTML = `<div class="dbx-empty">Ошибка: ${e.message}</div>`;
       return;
     }
 
     if (files.length === 0) {
-      container.innerHTML = `<div class="tg-empty">
-        Книг пока нет.<br>Открой своего бота в Telegram и отправь ему файлы книг.
+      container.innerHTML = `<div class="dbx-empty">
+        Папка /Читалка пуста или не существует.<br>
+        Добавь книги в папку <strong>/Читалка</strong> в своём Dropbox.
       </div>`;
       return;
     }
 
-    // Узнаём, какие книги уже есть в библиотеке
+    // Check which books are already in the library
     const existingBooks = await this.db.getAllBooks();
-    const existingIds   = new Set(existingBooks.map(b => b.telegramFileId).filter(Boolean));
+    const existingPaths = new Set(existingBooks.map(b => b.dropboxPath).filter(Boolean));
 
     const ICONS = { epub: '📗', pdf: '📕', txt: '📄', fb2: '📘' };
 
     container.innerHTML = files.map(f => {
-      const already = existingIds.has(f.file_id);
+      const already = existingPaths.has(f.path);
       const icon    = ICONS[f.ext] || '📄';
-      const size    = TelegramSync.formatSize(f.file_size);
-      const tooBig  = f.file_size > 20 * 1024 * 1024;
+      const size    = DropboxSync.formatSize(f.size);
 
-      return `<div class="tg-book-item" data-file-id="${f.file_id}">
-        <div class="tg-book-icon">${icon}</div>
-        <div class="tg-book-info">
-          <div class="tg-book-name">${escHtml(f.file_name)}</div>
-          <div class="tg-book-meta">${f.ext.toUpperCase()}${size ? ' · ' + size : ''}${tooBig ? ' · ⚠️ > 20 МБ' : ''}</div>
+      return `<div class="dbx-book-item" data-path="${escHtml(f.path)}">
+        <div class="dbx-book-icon">${icon}</div>
+        <div class="dbx-book-info">
+          <div class="dbx-book-name">${escHtml(f.name)}</div>
+          <div class="dbx-book-meta">${f.ext.toUpperCase()}${size ? ' · ' + size : ''}</div>
         </div>
-        <div class="tg-book-action">
+        <div class="dbx-book-action">
           ${already
-            ? '<button class="tg-dl-btn done" disabled>✓ Есть</button>'
-            : tooBig
-              ? '<button class="tg-dl-btn" disabled title="Telegram Bot API не поддерживает файлы > 20 МБ">Слишком большой</button>'
-              : `<button class="tg-dl-btn" data-file-id="${f.file_id}" data-file-name="${escHtml(f.file_name)}">Скачать</button>`
+            ? '<button class="dbx-dl-btn done" disabled>✓ Есть</button>'
+            : `<button class="dbx-dl-btn" data-path="${escHtml(f.path)}" data-name="${escHtml(f.name)}">Скачать</button>`
           }
         </div>
       </div>`;
     }).join('');
 
     // Bind download buttons
-    container.querySelectorAll('.tg-dl-btn:not(.done):not([disabled])').forEach(btn => {
-      btn.addEventListener('click', () => this.downloadTelegramBook(btn));
+    container.querySelectorAll('.dbx-dl-btn:not(.done)').forEach(btn => {
+      btn.addEventListener('click', () => this.downloadDropboxBook(btn));
     });
   }
 
-  async downloadTelegramBook(btn) {
-    const fileId   = btn.dataset.fileId;
-    const fileName = btn.dataset.fileName;
+  async downloadDropboxBook(btn) {
+    const path     = btn.dataset.path;
+    const fileName = btn.dataset.name;
 
     btn.textContent = '⏳'; btn.disabled = true;
 
     try {
-      const buf = await this.telegram.downloadFile(fileId);
+      const buf = await this.dropbox.downloadFile(path);
       const ext = fileName.split('.').pop().toLowerCase();
 
       let meta = { title: fileName.replace(/\.[^.]+$/, ''), author: '', coverUrl: null, html: null };
@@ -1646,16 +1639,16 @@ tags:
       if (ext === 'epub') { const p = await parseEPUBNative(buf);   meta = { ...meta, ...p }; }
 
       await this.db.addBook({
-        title:          meta.title,
-        author:         meta.author || '',
-        format:         ext,
-        content:        buf,
-        coverUrl:       meta.coverUrl || null,
-        html:           meta.html || null,
-        progress:       0,
-        addedAt:        Date.now(),
-        lastRead:       null,
-        telegramFileId: fileId,
+        title:       meta.title,
+        author:      meta.author || '',
+        format:      ext,
+        content:     buf,
+        coverUrl:    meta.coverUrl || null,
+        html:        meta.html || null,
+        progress:    0,
+        addedAt:     Date.now(),
+        lastRead:    null,
+        dropboxPath: path,
       });
 
       btn.textContent = '✓ Есть';
@@ -1790,23 +1783,19 @@ tags:
       }
     }, { passive: true });
 
-    // Telegram modal (✈️)
-    document.getElementById('tg-open-btn').addEventListener('click', () => this.openTelegramModal());
-    document.getElementById('tg-modal-close').addEventListener('click', () => this.closeTelegramModal());
-    document.getElementById('tg-connect-btn').addEventListener('click', () => this.connectTelegram());
-    document.getElementById('tg-disconnect-btn').addEventListener('click', () => this.disconnectTelegram());
-    document.getElementById('tg-refresh-btn').addEventListener('click', () => this.loadTelegramBooks());
-    document.getElementById('tg-save-proxy-btn').addEventListener('click', async () => {
-      const proxyUrl = document.getElementById('tg-proxy-connected').value.trim();
-      this.tgProxyUrl = proxyUrl;
-      const cfg = await this.db.getSetting('telegramConfig', {});
-      await this.db.setSetting('telegramConfig', { ...cfg, proxyUrl });
-      // Пересоздаём клиент с новым прокси
-      if (cfg?.token) this.telegram = new TelegramSync(cfg.token, proxyUrl || null);
-      this.showToast(proxyUrl ? 'Proxy сохранён ✓' : 'Proxy удалён');
+    // Dropbox modal (📦)
+    document.getElementById('dbx-open-btn').addEventListener('click', () => this.openDropboxModal());
+    document.getElementById('dbx-modal-close').addEventListener('click', () => this.closeDropboxModal());
+    document.getElementById('dbx-login-btn').addEventListener('click', () => this.startDropboxLogin());
+    document.getElementById('dbx-disconnect-btn').addEventListener('click', () => this.disconnectDropbox());
+    document.getElementById('dbx-refresh-btn').addEventListener('click', () => this.loadDropboxBooks());
+    document.getElementById('dbx-copy-uri-btn').addEventListener('click', () => {
+      const uri = document.getElementById('dbx-redirect-uri').textContent;
+      navigator.clipboard?.writeText(uri).then(() => this.showToast('URI скопирован ✓'))
+        .catch(() => this.showToast('Скопируй вручную: ' + uri));
     });
-    document.getElementById('tg-modal').addEventListener('click', (e) => {
-      if (e.target === document.getElementById('tg-modal')) this.closeTelegramModal();
+    document.getElementById('dbx-modal').addEventListener('click', (e) => {
+      if (e.target === document.getElementById('dbx-modal')) this.closeDropboxModal();
     });
 
     // Sync modal (☁️ Supabase)

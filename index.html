@@ -20,7 +20,7 @@
     <header class="lib-header">
       <h1>📚 Читалка</h1>
       <div class="header-actions">
-        <button class="icon-btn" id="tg-open-btn" title="Telegram — скачать книги">✈️</button>
+        <button class="icon-btn" id="dbx-open-btn" title="Dropbox — скачать книги">📦</button>
         <button class="icon-btn" id="sync-open-btn" title="Синхронизация">☁️</button>
         <button class="icon-btn" id="obsidian-global-btn" title="Настроить Obsidian">🔮</button>
         <button class="icon-btn" id="global-settings-btn" title="Настройки">⚙️</button>
@@ -206,48 +206,52 @@
     </div>
   </div>
 
-  <!-- ══ TELEGRAM MODAL ══════════════════════════════════════ -->
-  <div id="tg-modal">
-    <div class="tg-modal-inner">
-      <div class="tg-modal-header">
-        <h3>✈️ Telegram — книги</h3>
-        <button class="icon-btn" id="tg-modal-close">✕</button>
+  <!-- ══ DROPBOX MODAL ═══════════════════════════════════════ -->
+  <div id="dbx-modal">
+    <div class="dbx-modal-inner">
+      <div class="dbx-modal-header">
+        <h3>📦 Dropbox — книги</h3>
+        <button class="icon-btn" id="dbx-modal-close">✕</button>
       </div>
 
       <!-- Setup form -->
-      <div id="tg-setup-form">
-        <p class="sync-hint">Отправь книги своему Telegram-боту, и они появятся здесь для скачивания.</p>
-        <label class="sync-label">Bot Token</label>
-        <input class="sync-input" id="tg-token" type="password" placeholder="1234567890:ABCdef..." autocomplete="off">
-        <label class="sync-label">Proxy URL <span class="sync-hint-inline">(нужен на iPhone — см. инструкцию)</span></label>
-        <input class="sync-input" id="tg-proxy" type="url" placeholder="https://xxx.yyy.workers.dev" autocomplete="off">
+      <div id="dbx-setup-form">
+        <p class="sync-hint">Книги из папки <strong>/Читалка</strong> в Dropbox появятся здесь. Работает на Mac и iPhone без прокси.</p>
 
-        <button class="btn-primary" id="tg-connect-btn" style="margin-top:12px">Подключить</button>
+        <label class="sync-label">App Key</label>
+        <input class="sync-input" id="dbx-app-key" type="text" placeholder="abc123xyz456" autocomplete="off" spellcheck="false">
+
+        <label class="sync-label" style="margin-top:14px">Redirect URI <span class="sync-hint-inline">(скопируй в настройки Dropbox App)</span></label>
+        <div class="dbx-redirect-row">
+          <code class="dbx-redirect-uri" id="dbx-redirect-uri">…</code>
+          <button class="dbx-copy-btn" id="dbx-copy-uri-btn">Копировать</button>
+        </div>
+
+        <button class="btn-primary" id="dbx-login-btn" style="margin-top:16px">Войти через Dropbox →</button>
+
         <details class="sync-details" style="margin-top:16px">
-          <summary>Как создать бота и прокси</summary>
+          <summary>Как настроить (3 минуты)</summary>
           <ol class="sync-steps">
-            <li>Открой Telegram → найди <strong>@BotFather</strong> → <code>/newbot</code> → получи токен</li>
-            <li>Открой своего бота → нажми Start → отправь ему книги как <em>файлы</em> (не медиа)</li>
-            <li>Для iPhone нужен прокси: зайди на <strong>cloudflare.com</strong> → Sign Up (без карты)</li>
-            <li>Workers &amp; Pages → Create Worker → вставь код из инструкции → Deploy</li>
-            <li>Скопируй URL воркера (вида <code>https://xxx.workers.dev</code>) и вставь выше</li>
+            <li>Зайди на <strong>dropbox.com/developers/apps</strong> → Create app</li>
+            <li>Scoped access → Full Dropbox → придумай имя → Create app</li>
+            <li>Вкладка <em>Settings</em> → Redirect URIs → вставь URI выше → Add</li>
+            <li>Скопируй <strong>App key</strong> → вставь выше</li>
+            <li>Нажми «Войти через Dropbox» и разреши доступ</li>
+            <li>Загрузи книги в папку <strong>/Читалка</strong> в своём Dropbox</li>
           </ol>
         </details>
       </div>
 
-      <!-- Connected: book list -->
-      <div id="tg-book-list" style="display:none">
-        <div class="tg-toolbar">
-          <span class="tg-bot-name" id="tg-bot-name"></span>
-          <button class="tg-refresh-btn" id="tg-refresh-btn">↻ Обновить</button>
-          <button class="tg-disconnect-btn" id="tg-disconnect-btn">Отключить</button>
+      <!-- Connected -->
+      <div id="dbx-connected" style="display:none">
+        <div class="dbx-toolbar">
+          <span class="dbx-account-name" id="dbx-account-name"></span>
+          <button class="dbx-refresh-btn" id="dbx-refresh-btn">↻ Обновить</button>
+          <button class="dbx-disconnect-btn" id="dbx-disconnect-btn">Отключить</button>
         </div>
-        <div class="tg-proxy-row">
-          <input class="sync-input" id="tg-proxy-connected" type="url" placeholder="Proxy URL для iPhone (workers.dev)" autocomplete="off" style="font-size:12px;padding:7px 10px">
-          <button class="tg-save-proxy-btn" id="tg-save-proxy-btn">Сохранить</button>
-        </div>
-        <div id="tg-books" class="tg-books">
-          <div class="tg-empty">Загрузка…</div>
+        <p class="sync-hint" style="margin-bottom:10px">Папка: <code>/Читалка</code></p>
+        <div id="dbx-books" class="dbx-books">
+          <div class="dbx-empty">Загрузка…</div>
         </div>
       </div>
     </div>
