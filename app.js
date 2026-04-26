@@ -1231,6 +1231,9 @@ class App {
 
     bar.style.left = clampedX + 'px';
     bar.style.top = clampedY + 'px';
+
+    // Защищаем панель от немедленного скрытия (следующий touchstart/mousedown закроет её)
+    this._barProtectedUntil = Date.now() + 500;
   }
 
   hideSelectionBar() {
@@ -2368,7 +2371,11 @@ tags:
 
     // Скрываем бар на десктопе при клике вне него
     document.addEventListener('mousedown', (e) => {
-      if (!e.target.closest('#selection-bar')) this.hideSelectionBar();
+      if (!e.target.closest('#selection-bar')) {
+        this._removePendingSelectionMark();
+        this.hideSelectionBar();
+        this.pendingSelection = null;
+      }
     });
     // На тачскрине: скрываем бар при тапе вне его — НО только если модалка заметки закрыта.
     // Иначе тап по textarea обнуляет pendingSelection и заметка не сохраняется.
@@ -2379,6 +2386,8 @@ tags:
       if (document.getElementById('note-modal')?.classList.contains('open')) return;
       // Скрываем панель и очищаем выделение только если в документе нет активного выделения
       setTimeout(() => {
+        // Бар только что показали (touchend выделения) — не трогаем
+        if (Date.now() < (this._barProtectedUntil || 0)) return;
         const sel = window.getSelection();
         if (!sel || sel.isCollapsed) {
           this._removePendingSelectionMark();
