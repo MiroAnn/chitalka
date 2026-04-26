@@ -303,17 +303,11 @@ html, body {
   word-break: break-word;
   overflow-wrap: break-word;
   -webkit-touch-callout: none;
-  /* Запрет нативного выделения текста — iOS не показывает меню Copy/Writing Tools.
-     Своё выделение реализуем через caretRangeFromPoint + long-press. */
-  -webkit-user-select: none;
-  user-select: none;
 }
-/* Временная подсветка выделения (пока пользователь не нажал «Цитата» / «Заметка») */
+/* Временная подсветка кастомного выделения */
 mark.pending-selection {
   background: rgba(90, 140, 255, 0.30);
   border-radius: 2px;
-  -webkit-user-select: none;
-  user-select: none;
 }
 
 .text-content p {

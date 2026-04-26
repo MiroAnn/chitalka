@@ -950,18 +950,13 @@ class App {
       this.pushProgress(this.currentBook, pct);
     });
 
-    // Desktop: обычный mouseup
-    div.addEventListener('mouseup', (e) => {
-      if (this._isIOS) return;
-      this._handleTextSelection(e);
-    });
+    // Выделение текста
+    div.addEventListener('mouseup',  (e) => this._handleTextSelection(e));
+    div.addEventListener('touchend', (e) => setTimeout(() => this._handleTextSelection(e), 100));
     div.addEventListener('contextmenu', (e) => {
       const sel = window.getSelection();
       if (sel && !sel.isCollapsed) e.preventDefault();
     });
-
-    // iOS: кастомный long-press (user-select:none запрещает нативное выделение → меню не появляется)
-    if (this._isIOS) this._setupCustomIOSSelection(div);
 
     document.getElementById('reader-footer').style.display = 'flex';
     this.updateProgress(savedPct);
@@ -1072,7 +1067,7 @@ class App {
       const rect = range.getBoundingClientRect();
       x = rect.left + rect.width / 2;
       y = rect.top - 10;
-      savedRange = range.cloneRange(); // сохраняем до сброса выделения
+      savedRange = range.cloneRange();
     } catch {}
 
     this.pendingSelection = {
@@ -1080,6 +1075,9 @@ class App {
       range: savedRange,
       context: { type: this.currentBook?.format || 'text' }
     };
+
+    // Снимаем нативное выделение — убирает iOS-меню
+    try { window.getSelection()?.removeAllRanges(); } catch {}
 
     this.showSelectionBar(x, y);
   }
@@ -2375,17 +2373,19 @@ tags:
     // На тачскрине: скрываем бар при тапе вне его — НО только если модалка заметки закрыта.
     // Иначе тап по textarea обнуляет pendingSelection и заметка не сохраняется.
     document.addEventListener('touchend', (e) => {
+      // Тап по нашей панели — ничего не делаем
       if (e.target.closest('#selection-bar')) return;
+      // Модалка заметки открыта — не трогаем pendingSelection (иначе заметка не сохранится)
       if (document.getElementById('note-modal')?.classList.contains('open')) return;
-      // Если pendingSelection установлен — наша панель активна, не трогаем её
-      if (this.pendingSelection) return;
+      // Скрываем панель и очищаем выделение только если в документе нет активного выделения
       setTimeout(() => {
         const sel = window.getSelection();
         if (!sel || sel.isCollapsed) {
           this._removePendingSelectionMark();
           this.hideSelectionBar();
+          this.pendingSelection = null;
         }
-      }, 100);
+      }, 150);
     }, { passive: true });
 
     // Dropbox modal (📦)
