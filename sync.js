@@ -38,16 +38,26 @@ class SyncClient {
     };
   }
 
-  async _apiFetch(path, opts = {}) {
-    const res = await fetch('https://api.github.com' + path, {
-      ...opts,
-      headers: { ...this._headers, ...opts.headers },
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`GitHub ${res.status}: ${text.slice(0, 120)}`);
+  async _apiFetch(path, opts = {}, timeoutMs = 12000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch('https://api.github.com' + path, {
+        ...opts,
+        signal: controller.signal,
+        headers: { ...this._headers, ...opts.headers },
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`GitHub ${res.status}: ${text.slice(0, 120)}`);
+      }
+      return res.status === 204 ? null : res.json();
+    } catch (e) {
+      if (e.name === 'AbortError') throw new Error('Превышено время ожидания (GitHub)');
+      throw e;
+    } finally {
+      clearTimeout(timer);
     }
-    return res.status === 204 ? null : res.json();
   }
 
   // ── Найти или создать gist ─────────────────────────────────
@@ -174,10 +184,25 @@ class TelegramSync {
     this._base = `https://api.telegram.org/bot${botToken}`;
   }
 
+  // Вспомогательный fetch с таймаутом
+  async _tgFetch(url, opts = {}, timeoutMs = 12000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { ...opts, signal: controller.signal });
+      return res;
+    } catch (e) {
+      if (e.name === 'AbortError') throw new Error('Превышено время ожидания — проверь интернет');
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   // Проверка токена
   async ping() {
     try {
-      const res = await fetch(`${this._base}/getMe`);
+      const res = await this._tgFetch(`${this._base}/getMe`);
       const data = await res.json();
       return data.ok === true;
     } catch { return false; }
@@ -185,7 +210,7 @@ class TelegramSync {
 
   // Получить список книг из последних сообщений бота
   async fetchFileCatalog() {
-    const res = await fetch(`${this._base}/getUpdates?limit=100&allowed_updates=%5B%22message%22%5D`);
+    const res = await this._tgFetch(`${this._base}/getUpdates?limit=100&allowed_updates=%5B%22message%22%5D`);
     if (!res.ok) throw new Error('Telegram API недоступен');
     const data = await res.json();
     if (!data.ok) throw new Error(data.description || 'Ошибка Telegram');
@@ -215,17 +240,23 @@ class TelegramSync {
   }
 
   // Скачать файл по file_id → ArrayBuffer
-  async downloadFile(file_id) {
-    const r1 = await fetch(`${this._base}/getFile?file_id=${encodeURIComponent(file_id)}`);
+  // proxyUrl: опциональный прокси (нужен на iPhone/Safari из-за CORS)
+  async downloadFile(file_id, proxyUrl = null) {
+    const r1 = await this._tgFetch(`${this._base}/getFile?file_id=${encodeURIComponent(file_id)}`);
     if (!r1.ok) throw new Error('Ошибка получения файла');
     const j1 = await r1.json();
     if (!j1.ok || !j1.result?.file_path) {
       throw new Error('Файл недоступен — возможно, он больше 20 МБ');
     }
 
-    const fileUrl = `https://api.telegram.org/file/bot${this.token}/${j1.result.file_path}`;
-    const r2 = await fetch(fileUrl);
-    if (!r2.ok) throw new Error('Ошибка скачивания файла');
+    const tgFileUrl = `https://api.telegram.org/file/bot${this.token}/${j1.result.file_path}`;
+    // Если задан прокси — скачиваем через него (нужно для Safari/iPhone из-за CORS)
+    const downloadUrl = proxyUrl
+      ? `${proxyUrl.replace(/\/$/, '')}?url=${encodeURIComponent(tgFileUrl)}`
+      : tgFileUrl;
+
+    const r2 = await this._tgFetch(downloadUrl, {}, 60000);
+    if (!r2.ok) throw new Error(`Ошибка скачивания (${r2.status})${proxyUrl ? '' : ' — попробуй добавить Proxy URL'}`);
     return r2.arrayBuffer();
   }
 

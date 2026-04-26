@@ -1245,6 +1245,15 @@ mark.reader-highlight-note:hover { background: rgba(100, 160, 255, 0.45); }
   text-align: center; color: var(--text-muted);
   font-size: 14px; padding: 30px 0; line-height: 1.6;
 }
+.tg-proxy-row {
+  display: flex; gap: 8px; margin-bottom: 12px; align-items: center;
+}
+.tg-proxy-row .sync-input { flex: 1; }
+.tg-save-proxy-btn {
+  font-size: 12px; padding: 7px 12px; flex-shrink: 0;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); color: var(--text); cursor: pointer; white-space: nowrap;
+}
 
 @media (max-width: 420px) {
   .lib-header h1 { font-size: 19px; }

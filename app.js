@@ -466,8 +466,9 @@ class App {
     this.syncReady = false;
 
     // Telegram
-    this.telegram = null;     // TelegramSync instance
-    this.tgBotName = '';
+    this.telegram   = null;   // TelegramSync instance
+    this.tgBotName  = '';
+    this.tgProxyUrl = '';     // CORS proxy для iPhone/Safari
   }
 
   // ── INIT ──────────────────────────────────────────────────
@@ -1495,8 +1496,9 @@ tags:
   async initTelegram() {
     const cfg = await this.db.getSetting('telegramConfig', null);
     if (cfg?.token) {
-      this.telegram = new TelegramSync(cfg.token);
-      this.tgBotName = cfg.botName || '';
+      this.telegram   = new TelegramSync(cfg.token);
+      this.tgBotName  = cfg.botName  || '';
+      this.tgProxyUrl = cfg.proxyUrl || '';
     }
   }
 
@@ -1508,11 +1510,13 @@ tags:
       setup.style.display = 'none';
       list.style.display  = 'block';
       document.getElementById('tg-bot-name').textContent = '@' + (this.tgBotName || 'бот');
+      document.getElementById('tg-proxy-connected').value = this.tgProxyUrl || '';
       this.loadTelegramBooks();
     } else {
       setup.style.display = 'block';
       list.style.display  = 'none';
       document.getElementById('tg-token').value = '';
+      document.getElementById('tg-proxy').value = '';
     }
     document.getElementById('tg-modal').classList.add('open');
   }
@@ -1528,33 +1532,38 @@ tags:
     const btn = document.getElementById('tg-connect-btn');
     btn.textContent = 'Проверяем…'; btn.disabled = true;
 
-    const tg = new TelegramSync(token);
     let botName = '';
     try {
-      const res = await fetch(`https://api.telegram.org/bot${token}/getMe`);
-      const data = await res.json();
-      if (!data.ok) throw new Error(data.description || 'Неверный токен');
-      botName = data.result.username || data.result.first_name || '';
+      const tg = new TelegramSync(token);
+      const res = await tg._tgFetch(`https://api.telegram.org/bot${token}/getMe`);
+
+      let data;
+      try { data = await res.json(); } catch { throw new Error('Не удалось прочитать ответ'); }
+
+      if (!res.ok || !data.ok) {
+        throw new Error(data?.description || `Ошибка ${res.status} — проверь токен`);
+      }
+
+      botName = data.result?.username || data.result?.first_name || 'бот';
+      const proxyUrl = document.getElementById('tg-proxy').value.trim();
+
+      this.telegram   = tg;
+      this.tgBotName  = botName;
+      this.tgProxyUrl = proxyUrl;
+      await this.db.setSetting('telegramConfig', { token, botName, proxyUrl });
+
+      document.getElementById('tg-setup-form').style.display = 'none';
+      document.getElementById('tg-book-list').style.display  = 'block';
+      document.getElementById('tg-bot-name').textContent = '@' + botName;
+      document.getElementById('tg-proxy-connected').value = proxyUrl;
+      this.showToast('Telegram подключён ✓');
+      this.loadTelegramBooks();
+
     } catch (e) {
-      btn.textContent = 'Подключить'; btn.disabled = false;
       this.showToast('Ошибка: ' + e.message);
-      return;
+    } finally {
+      btn.textContent = 'Подключить'; btn.disabled = false;
     }
-
-    this.telegram  = tg;
-    this.tgBotName = botName;
-    await this.db.setSetting('telegramConfig', { token, botName });
-
-    btn.textContent = 'Подключить'; btn.disabled = false;
-
-    // Show book list
-    const setup = document.getElementById('tg-setup-form');
-    const list  = document.getElementById('tg-book-list');
-    setup.style.display = 'none';
-    list.style.display  = 'block';
-    document.getElementById('tg-bot-name').textContent = '@' + botName;
-    this.showToast('Telegram подключён: @' + botName);
-    this.loadTelegramBooks();
   }
 
   async disconnectTelegram() {
@@ -1627,7 +1636,7 @@ tags:
     btn.textContent = '⏳'; btn.disabled = true;
 
     try {
-      const buf = await this.telegram.downloadFile(fileId);
+      const buf = await this.telegram.downloadFile(fileId, this.tgProxyUrl || null);
       const ext = fileName.split('.').pop().toLowerCase();
 
       let meta = { title: fileName.replace(/\.[^.]+$/, ''), author: '', coverUrl: null, html: null };
@@ -1786,6 +1795,13 @@ tags:
     document.getElementById('tg-connect-btn').addEventListener('click', () => this.connectTelegram());
     document.getElementById('tg-disconnect-btn').addEventListener('click', () => this.disconnectTelegram());
     document.getElementById('tg-refresh-btn').addEventListener('click', () => this.loadTelegramBooks());
+    document.getElementById('tg-save-proxy-btn').addEventListener('click', async () => {
+      const proxyUrl = document.getElementById('tg-proxy-connected').value.trim();
+      this.tgProxyUrl = proxyUrl;
+      const cfg = await this.db.getSetting('telegramConfig', {});
+      await this.db.setSetting('telegramConfig', { ...cfg, proxyUrl });
+      this.showToast(proxyUrl ? 'Proxy сохранён ✓' : 'Proxy удалён');
+    });
     document.getElementById('tg-modal').addEventListener('click', (e) => {
       if (e.target === document.getElementById('tg-modal')) this.closeTelegramModal();
     });

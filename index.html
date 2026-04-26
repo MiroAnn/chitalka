@@ -219,15 +219,18 @@
         <p class="sync-hint">Отправь книги своему Telegram-боту, и они появятся здесь для скачивания.</p>
         <label class="sync-label">Bot Token</label>
         <input class="sync-input" id="tg-token" type="password" placeholder="1234567890:ABCdef..." autocomplete="off">
+        <label class="sync-label">Proxy URL <span class="sync-hint-inline">(нужен на iPhone — см. инструкцию)</span></label>
+        <input class="sync-input" id="tg-proxy" type="url" placeholder="https://xxx.yyy.workers.dev" autocomplete="off">
+
         <button class="btn-primary" id="tg-connect-btn" style="margin-top:12px">Подключить</button>
         <details class="sync-details" style="margin-top:16px">
-          <summary>Как создать бота (1 минута)</summary>
+          <summary>Как создать бота и прокси</summary>
           <ol class="sync-steps">
-            <li>Открой Telegram → найди <strong>@BotFather</strong></li>
-            <li>Напиши <code>/newbot</code> → придумай имя</li>
-            <li>BotFather пришлёт токен вида <code>1234567890:ABCdef...</code></li>
-            <li>Вставь токен выше и нажми «Подключить»</li>
-            <li>Открой своего бота → нажми Start → отправь ему книги как файлы</li>
+            <li>Открой Telegram → найди <strong>@BotFather</strong> → <code>/newbot</code> → получи токен</li>
+            <li>Открой своего бота → нажми Start → отправь ему книги как <em>файлы</em> (не медиа)</li>
+            <li>Для iPhone нужен прокси: зайди на <strong>cloudflare.com</strong> → Sign Up (без карты)</li>
+            <li>Workers &amp; Pages → Create Worker → вставь код из инструкции → Deploy</li>
+            <li>Скопируй URL воркера (вида <code>https://xxx.workers.dev</code>) и вставь выше</li>
           </ol>
         </details>
       </div>
@@ -238,6 +241,10 @@
           <span class="tg-bot-name" id="tg-bot-name"></span>
           <button class="tg-refresh-btn" id="tg-refresh-btn">↻ Обновить</button>
           <button class="tg-disconnect-btn" id="tg-disconnect-btn">Отключить</button>
+        </div>
+        <div class="tg-proxy-row">
+          <input class="sync-input" id="tg-proxy-connected" type="url" placeholder="Proxy URL для iPhone (workers.dev)" autocomplete="off" style="font-size:12px;padding:7px 10px">
+          <button class="tg-save-proxy-btn" id="tg-save-proxy-btn">Сохранить</button>
         </div>
         <div id="tg-books" class="tg-books">
           <div class="tg-empty">Загрузка…</div>
