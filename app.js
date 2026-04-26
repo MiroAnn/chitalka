@@ -2371,11 +2371,12 @@ tags:
 
     // Скрываем бар на десктопе при клике вне него
     document.addEventListener('mousedown', (e) => {
-      if (!e.target.closest('#selection-bar')) {
-        this._removePendingSelectionMark();
-        this.hideSelectionBar();
-        this.pendingSelection = null;
-      }
+      if (e.target.closest('#selection-bar')) return;
+      // Модалка заметки открыта — не трогаем pendingSelection (иначе заметка не сохранится)
+      if (document.getElementById('note-modal')?.classList.contains('open')) return;
+      this._removePendingSelectionMark();
+      this.hideSelectionBar();
+      this.pendingSelection = null;
     });
     // На тачскрине: скрываем бар при тапе вне его — НО только если модалка заметки закрыта.
     // Иначе тап по textarea обнуляет pendingSelection и заметка не сохраняется.
