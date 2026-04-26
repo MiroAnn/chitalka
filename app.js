@@ -950,44 +950,42 @@ class App {
       this.pushProgress(this.currentBook, pct);
     });
 
-    // Selection
-    div.addEventListener('mouseup', (e) => this._handleTextSelection(e));
-    div.addEventListener('touchend', (e) => setTimeout(() => this._handleTextSelection(e), 200));
-
-    // Скрываем нативное контекстное меню (ПКМ на десктопе)
-    div.addEventListener('contextmenu', (e) => {
-      const sel = window.getSelection();
-      if (sel && !sel.isCollapsed) e.preventDefault();
+    // Desktop: обычный mouseup
+    div.addEventListener('mouseup', (e) => {
+      if (this._isIOS) return; // iOS сам генерирует mouseup — пропускаем, обработаем в touchend
+      this._handleTextSelection(e);
     });
 
-    // selectionchange: обновляем pendingSelection когда пользователь корректирует ручки на iPad
-    document.addEventListener('selectionchange', this._selectionChangeHandler = () => {
+    // iOS: перехватываем выделение СИНХРОННО в touchend —
+    // до того как iOS успевает отрисовать своё меню «Copy / Writing Tools».
+    div.addEventListener('touchend', (e) => {
+      if (!this._isIOS) return; // на десктопе обрабатывает mouseup
       const sel = window.getSelection();
       if (!sel || sel.isCollapsed) return;
       const text = sel.toString().trim();
-      if (text.length < 2) return;
+      if (text.length < 2) { sel.removeAllRanges(); return; }
 
       try {
         const range = sel.getRangeAt(0);
-        const tc = document.getElementById('text-content');
-        if (!tc || !tc.contains(range.commonAncestorContainer)) return;
+        const rect  = range.getBoundingClientRect();
+        const savedRange = range.cloneRange();
 
-        const rect = range.getBoundingClientRect();
         this.pendingSelection = {
           text,
-          range: range.cloneRange(),
+          range: savedRange,
           context: { type: this.currentBook?.format || 'text' }
         };
 
-        // Перемещаем нашу панель вслед за выделением (только если она уже открыта)
-        const bar = document.getElementById('selection-bar');
-        if (bar && bar.style.display === 'flex') {
-          this.showSelectionBar(rect.left + rect.width / 2, rect.top - 10);
-        }
-
-        // Пользователь двигает ручки — перезапускаем таймер сброса
-        if (this._isIOS) this._scheduleIOSSelectionClear();
+        // Убираем нативное выделение СИНХРОННО — меню не успевает появиться
+        sel.removeAllRanges();
+        this.showSelectionBar(rect.left + rect.width / 2, rect.top - 10);
       } catch {}
+    }, { passive: true });
+
+    // Скрываем контекстное меню ПКМ на десктопе
+    div.addEventListener('contextmenu', (e) => {
+      const sel = window.getSelection();
+      if (sel && !sel.isCollapsed) e.preventDefault();
     });
 
     document.getElementById('reader-footer').style.display = 'flex';
@@ -1109,11 +1107,6 @@ class App {
     };
 
     this.showSelectionBar(x, y);
-
-    // На iOS: оставляем выделение видимым (ручки для корректировки),
-    // но через 1.2с убираем его — нативное меню iOS исчезает,
-    // а наша панель и сохранённый range остаются, кнопки становятся доступны.
-    if (this._isIOS) this._scheduleIOSSelectionClear();
   }
 
   // Запускаем таймер: через 1.2с снимаем нативное выделение.
@@ -2265,22 +2258,22 @@ tags:
       }
     });
 
-    // Hide selection bar when clicking outside it
-    // На десктопе — скрываем сразу при mousedown вне бара
+    // Скрываем бар на десктопе при клике вне него
     document.addEventListener('mousedown', (e) => {
       if (!e.target.closest('#selection-bar')) this.hideSelectionBar();
     });
-    // На тачскрине — скрываем бар только если выделение исчезло (пользователь убрал его,
-    // а не начал тянуть ручку). Проверяем через небольшую задержку после touchend.
+    // На тачскрине: скрываем бар при тапе вне его — НО только если модалка заметки закрыта.
+    // Иначе тап по textarea обнуляет pendingSelection и заметка не сохраняется.
     document.addEventListener('touchend', (e) => {
-      if (e.target.closest('#selection-bar')) return; // тап по нашему бару — не трогаем
+      if (e.target.closest('#selection-bar')) return;
+      if (document.getElementById('note-modal')?.classList.contains('open')) return;
       setTimeout(() => {
         const sel = window.getSelection();
         if (!sel || sel.isCollapsed) {
           this.hideSelectionBar();
           this.pendingSelection = null;
         }
-      }, 300);
+      }, 100);
     }, { passive: true });
 
     // Dropbox modal (📦)
