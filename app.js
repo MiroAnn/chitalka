@@ -448,6 +448,9 @@ class App {
     // Obsidian: handle сохранённой директории (может требовать переразрешения)
     this._pendingObsidianHandle = null;
 
+    // iOS: таймер для авто-сброса выделения (убирает нативное меню)
+    this._iosSelectionClearTimer = null;
+
     // EPUB
     this.epubBook = null;
     this.rendition = null;
@@ -981,6 +984,9 @@ class App {
         if (bar && bar.style.display === 'flex') {
           this.showSelectionBar(rect.left + rect.width / 2, rect.top - 10);
         }
+
+        // Пользователь двигает ручки — перезапускаем таймер сброса
+        if (this._isIOS) this._scheduleIOSSelectionClear();
       } catch {}
     });
 
@@ -1102,11 +1108,23 @@ class App {
       context: { type: this.currentBook?.format || 'text' }
     };
 
-    // Выделение НЕ снимаем — пользователь должен иметь возможность
-    // корректировать его длину перетаскивая ручки на iPad.
-    // removeAllRanges() вызовем только когда нажмут нашу кнопку «Цитата» / «Заметка».
-
     this.showSelectionBar(x, y);
+
+    // На iOS: оставляем выделение видимым (ручки для корректировки),
+    // но через 1.2с убираем его — нативное меню iOS исчезает,
+    // а наша панель и сохранённый range остаются, кнопки становятся доступны.
+    if (this._isIOS) this._scheduleIOSSelectionClear();
+  }
+
+  // Запускаем таймер: через 1.2с снимаем нативное выделение.
+  // Если пользователь двигает ручки — selectionchange сбрасывает таймер заново.
+  // Наш бар и pendingSelection.range при этом сохраняются — кнопки работают.
+  _scheduleIOSSelectionClear() {
+    clearTimeout(this._iosSelectionClearTimer);
+    this._iosSelectionClearTimer = setTimeout(() => {
+      if (!this.pendingSelection) return; // бар уже скрыт
+      try { window.getSelection()?.removeAllRanges(); } catch {}
+    }, 1200);
   }
 
   // ── SELECTION BAR ─────────────────────────────────────────
@@ -1124,6 +1142,7 @@ class App {
 
   hideSelectionBar() {
     document.getElementById('selection-bar').style.display = 'none';
+    clearTimeout(this._iosSelectionClearTimer);
   }
 
   // ── ANNOTATIONS ───────────────────────────────────────────
