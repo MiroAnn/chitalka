@@ -262,10 +262,12 @@ class TelegramSync {
     }
     const r2 = await this._tgFetch(this._fileUrl(j1.result.file_path), {}, 60000);
     if (!r2.ok) {
-      const hint = this.proxyUrl ? '' : ' — добавь Proxy URL для iPhone';
+      const hint = this.proxyUrl ? '' : ' — добавь Proxy URL';
       throw new Error(`Ошибка скачивания (${r2.status})${hint}`);
     }
-    return r2.arrayBuffer();
+    // blob() → arrayBuffer() надёжнее работает в Safari на iOS/iPadOS
+    const blob = await r2.blob();
+    return blob.arrayBuffer();
   }
 
   static formatSize(bytes) {
