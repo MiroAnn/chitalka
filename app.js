@@ -464,6 +464,10 @@ class App {
     // Sync
     this.sync = null;         // SyncClient instance
     this.syncReady = false;
+
+    // Telegram
+    this.telegram = null;     // TelegramSync instance
+    this.tgBotName = '';
   }
 
   // ── INIT ──────────────────────────────────────────────────
@@ -474,6 +478,7 @@ class App {
     this.bindEvents();
     this.registerSW();
     await this.initSync();
+    await this.initTelegram();
     await this.renderLibrary();
   }
 
@@ -1486,6 +1491,174 @@ tags:
     } catch {}
   }
 
+  // ── TELEGRAM ──────────────────────────────────────────────
+  async initTelegram() {
+    const cfg = await this.db.getSetting('telegramConfig', null);
+    if (cfg?.token) {
+      this.telegram = new TelegramSync(cfg.token);
+      this.tgBotName = cfg.botName || '';
+    }
+  }
+
+  openTelegramModal() {
+    const setup = document.getElementById('tg-setup-form');
+    const list  = document.getElementById('tg-book-list');
+
+    if (this.telegram) {
+      setup.style.display = 'none';
+      list.style.display  = 'block';
+      document.getElementById('tg-bot-name').textContent = '@' + (this.tgBotName || 'бот');
+      this.loadTelegramBooks();
+    } else {
+      setup.style.display = 'block';
+      list.style.display  = 'none';
+      document.getElementById('tg-token').value = '';
+    }
+    document.getElementById('tg-modal').classList.add('open');
+  }
+
+  closeTelegramModal() {
+    document.getElementById('tg-modal').classList.remove('open');
+  }
+
+  async connectTelegram() {
+    const token = document.getElementById('tg-token').value.trim();
+    if (!token) { this.showToast('Введи токен бота'); return; }
+
+    const btn = document.getElementById('tg-connect-btn');
+    btn.textContent = 'Проверяем…'; btn.disabled = true;
+
+    const tg = new TelegramSync(token);
+    let botName = '';
+    try {
+      const res = await fetch(`https://api.telegram.org/bot${token}/getMe`);
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.description || 'Неверный токен');
+      botName = data.result.username || data.result.first_name || '';
+    } catch (e) {
+      btn.textContent = 'Подключить'; btn.disabled = false;
+      this.showToast('Ошибка: ' + e.message);
+      return;
+    }
+
+    this.telegram  = tg;
+    this.tgBotName = botName;
+    await this.db.setSetting('telegramConfig', { token, botName });
+
+    btn.textContent = 'Подключить'; btn.disabled = false;
+
+    // Show book list
+    const setup = document.getElementById('tg-setup-form');
+    const list  = document.getElementById('tg-book-list');
+    setup.style.display = 'none';
+    list.style.display  = 'block';
+    document.getElementById('tg-bot-name').textContent = '@' + botName;
+    this.showToast('Telegram подключён: @' + botName);
+    this.loadTelegramBooks();
+  }
+
+  async disconnectTelegram() {
+    this.telegram  = null;
+    this.tgBotName = '';
+    await this.db.setSetting('telegramConfig', null);
+    document.getElementById('tg-setup-form').style.display = 'block';
+    document.getElementById('tg-book-list').style.display  = 'none';
+    this.showToast('Telegram отключён');
+  }
+
+  async loadTelegramBooks() {
+    const container = document.getElementById('tg-books');
+    container.innerHTML = '<div class="tg-empty">Загружаем список книг…</div>';
+
+    let files;
+    try {
+      files = await this.telegram.fetchFileCatalog();
+    } catch (e) {
+      container.innerHTML = `<div class="tg-empty">Ошибка: ${e.message}</div>`;
+      return;
+    }
+
+    if (files.length === 0) {
+      container.innerHTML = `<div class="tg-empty">
+        Книг пока нет.<br>Открой своего бота в Telegram и отправь ему файлы книг.
+      </div>`;
+      return;
+    }
+
+    // Узнаём, какие книги уже есть в библиотеке
+    const existingBooks = await this.db.getAllBooks();
+    const existingIds   = new Set(existingBooks.map(b => b.telegramFileId).filter(Boolean));
+
+    const ICONS = { epub: '📗', pdf: '📕', txt: '📄', fb2: '📘' };
+
+    container.innerHTML = files.map(f => {
+      const already = existingIds.has(f.file_id);
+      const icon    = ICONS[f.ext] || '📄';
+      const size    = TelegramSync.formatSize(f.file_size);
+      const tooBig  = f.file_size > 20 * 1024 * 1024;
+
+      return `<div class="tg-book-item" data-file-id="${f.file_id}">
+        <div class="tg-book-icon">${icon}</div>
+        <div class="tg-book-info">
+          <div class="tg-book-name">${escHtml(f.file_name)}</div>
+          <div class="tg-book-meta">${f.ext.toUpperCase()}${size ? ' · ' + size : ''}${tooBig ? ' · ⚠️ > 20 МБ' : ''}</div>
+        </div>
+        <div class="tg-book-action">
+          ${already
+            ? '<button class="tg-dl-btn done" disabled>✓ Есть</button>'
+            : tooBig
+              ? '<button class="tg-dl-btn" disabled title="Telegram Bot API не поддерживает файлы > 20 МБ">Слишком большой</button>'
+              : `<button class="tg-dl-btn" data-file-id="${f.file_id}" data-file-name="${escHtml(f.file_name)}">Скачать</button>`
+          }
+        </div>
+      </div>`;
+    }).join('');
+
+    // Bind download buttons
+    container.querySelectorAll('.tg-dl-btn:not(.done):not([disabled])').forEach(btn => {
+      btn.addEventListener('click', () => this.downloadTelegramBook(btn));
+    });
+  }
+
+  async downloadTelegramBook(btn) {
+    const fileId   = btn.dataset.fileId;
+    const fileName = btn.dataset.fileName;
+
+    btn.textContent = '⏳'; btn.disabled = true;
+
+    try {
+      const buf = await this.telegram.downloadFile(fileId);
+      const ext = fileName.split('.').pop().toLowerCase();
+
+      let meta = { title: fileName.replace(/\.[^.]+$/, ''), author: '', coverUrl: null, html: null };
+      if (ext === 'txt')  { const p = parseTXT(buf);                meta = { ...meta, ...p }; }
+      if (ext === 'fb2')  { const p = parseFB2(buf);                meta = { ...meta, ...p }; }
+      if (ext === 'epub') { const p = await parseEPUBNative(buf);   meta = { ...meta, ...p }; }
+
+      await this.db.addBook({
+        title:          meta.title,
+        author:         meta.author || '',
+        format:         ext,
+        content:        buf,
+        coverUrl:       meta.coverUrl || null,
+        html:           meta.html || null,
+        progress:       0,
+        addedAt:        Date.now(),
+        lastRead:       null,
+        telegramFileId: fileId,
+      });
+
+      btn.textContent = '✓ Есть';
+      btn.classList.add('done');
+      await this.renderLibrary();
+      this.showToast('✓ ' + meta.title);
+    } catch (e) {
+      btn.textContent = 'Скачать';
+      btn.disabled = false;
+      this.showToast('Ошибка: ' + e.message);
+    }
+  }
+
   // ── EVENT BINDINGS ────────────────────────────────────────
   bindEvents() {
     // Library: add book
@@ -1606,6 +1779,16 @@ tags:
         this.hideSelectionBar();
       }
     }, { passive: true });
+
+    // Telegram modal (✈️)
+    document.getElementById('tg-open-btn').addEventListener('click', () => this.openTelegramModal());
+    document.getElementById('tg-modal-close').addEventListener('click', () => this.closeTelegramModal());
+    document.getElementById('tg-connect-btn').addEventListener('click', () => this.connectTelegram());
+    document.getElementById('tg-disconnect-btn').addEventListener('click', () => this.disconnectTelegram());
+    document.getElementById('tg-refresh-btn').addEventListener('click', () => this.loadTelegramBooks());
+    document.getElementById('tg-modal').addEventListener('click', (e) => {
+      if (e.target === document.getElementById('tg-modal')) this.closeTelegramModal();
+    });
 
     // Sync modal (☁️ Supabase)
     document.getElementById('sync-open-btn').addEventListener('click', () => this.openSyncModal());

@@ -166,3 +166,73 @@ class SyncClient {
     return data.annotations[bookHash] || [];
   }
 }
+
+// ── TELEGRAM SYNC ─────────────────────────────────────────────
+class TelegramSync {
+  constructor(botToken) {
+    this.token = botToken;
+    this._base = `https://api.telegram.org/bot${botToken}`;
+  }
+
+  // Проверка токена
+  async ping() {
+    try {
+      const res = await fetch(`${this._base}/getMe`);
+      const data = await res.json();
+      return data.ok === true;
+    } catch { return false; }
+  }
+
+  // Получить список книг из последних сообщений бота
+  async fetchFileCatalog() {
+    const res = await fetch(`${this._base}/getUpdates?limit=100&allowed_updates=%5B%22message%22%5D`);
+    if (!res.ok) throw new Error('Telegram API недоступен');
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.description || 'Ошибка Telegram');
+
+    const seen = new Set();
+    const files = [];
+
+    for (const update of (data.result || [])) {
+      const doc = update.message?.document;
+      if (!doc) continue;
+      if (seen.has(doc.file_id)) continue;
+      seen.add(doc.file_id);
+
+      const ext = (doc.file_name || '').split('.').pop().toLowerCase();
+      if (!['epub', 'pdf', 'txt', 'fb2'].includes(ext)) continue;
+
+      files.push({
+        file_id:   doc.file_id,
+        file_name: doc.file_name || 'Книга.' + ext,
+        file_size: doc.file_size || 0,
+        ext,
+      });
+    }
+
+    // Свежие сначала
+    return files.reverse();
+  }
+
+  // Скачать файл по file_id → ArrayBuffer
+  async downloadFile(file_id) {
+    const r1 = await fetch(`${this._base}/getFile?file_id=${encodeURIComponent(file_id)}`);
+    if (!r1.ok) throw new Error('Ошибка получения файла');
+    const j1 = await r1.json();
+    if (!j1.ok || !j1.result?.file_path) {
+      throw new Error('Файл недоступен — возможно, он больше 20 МБ');
+    }
+
+    const fileUrl = `https://api.telegram.org/file/bot${this.token}/${j1.result.file_path}`;
+    const r2 = await fetch(fileUrl);
+    if (!r2.ok) throw new Error('Ошибка скачивания файла');
+    return r2.arrayBuffer();
+  }
+
+  // Форматирование размера
+  static formatSize(bytes) {
+    if (!bytes) return '';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + ' КБ';
+    return (bytes / 1024 / 1024).toFixed(1) + ' МБ';
+  }
+}

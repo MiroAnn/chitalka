@@ -20,6 +20,7 @@
     <header class="lib-header">
       <h1>📚 Читалка</h1>
       <div class="header-actions">
+        <button class="icon-btn" id="tg-open-btn" title="Telegram — скачать книги">✈️</button>
         <button class="icon-btn" id="sync-open-btn" title="Синхронизация">☁️</button>
         <button class="icon-btn" id="obsidian-global-btn" title="Настроить Obsidian">🔮</button>
         <button class="icon-btn" id="global-settings-btn" title="Настройки">⚙️</button>
@@ -201,6 +202,46 @@
             Приложение создаст приватный Gist <code>читалка-{код}</code> и будет хранить там позиции и заметки.
           </p>
         </details>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ TELEGRAM MODAL ══════════════════════════════════════ -->
+  <div id="tg-modal">
+    <div class="tg-modal-inner">
+      <div class="tg-modal-header">
+        <h3>✈️ Telegram — книги</h3>
+        <button class="icon-btn" id="tg-modal-close">✕</button>
+      </div>
+
+      <!-- Setup form -->
+      <div id="tg-setup-form">
+        <p class="sync-hint">Отправь книги своему Telegram-боту, и они появятся здесь для скачивания.</p>
+        <label class="sync-label">Bot Token</label>
+        <input class="sync-input" id="tg-token" type="password" placeholder="1234567890:ABCdef..." autocomplete="off">
+        <button class="btn-primary" id="tg-connect-btn" style="margin-top:12px">Подключить</button>
+        <details class="sync-details" style="margin-top:16px">
+          <summary>Как создать бота (1 минута)</summary>
+          <ol class="sync-steps">
+            <li>Открой Telegram → найди <strong>@BotFather</strong></li>
+            <li>Напиши <code>/newbot</code> → придумай имя</li>
+            <li>BotFather пришлёт токен вида <code>1234567890:ABCdef...</code></li>
+            <li>Вставь токен выше и нажми «Подключить»</li>
+            <li>Открой своего бота → нажми Start → отправь ему книги как файлы</li>
+          </ol>
+        </details>
+      </div>
+
+      <!-- Connected: book list -->
+      <div id="tg-book-list" style="display:none">
+        <div class="tg-toolbar">
+          <span class="tg-bot-name" id="tg-bot-name"></span>
+          <button class="tg-refresh-btn" id="tg-refresh-btn">↻ Обновить</button>
+          <button class="tg-disconnect-btn" id="tg-disconnect-btn">Отключить</button>
+        </div>
+        <div id="tg-books" class="tg-books">
+          <div class="tg-empty">Загрузка…</div>
+        </div>
       </div>
     </div>
   </div>
