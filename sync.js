@@ -177,6 +177,14 @@ class SyncClient {
   }
 }
 
+// ── BASE64 HELPER ─────────────────────────────────────────────
+function _b64ToArrayBuffer(b64) {
+  const binary = atob(b64);
+  const bytes  = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
 // ── TELEGRAM SYNC ─────────────────────────────────────────────
 class TelegramSync {
   // proxyUrl: Cloudflare Worker URL — нужен на iPhone/Safari из-за CORS
@@ -265,9 +273,18 @@ class TelegramSync {
       const hint = this.proxyUrl ? '' : ' — добавь Proxy URL';
       throw new Error(`Ошибка скачивания (${r2.status})${hint}`);
     }
-    // blob() → arrayBuffer() надёжнее работает в Safari на iOS/iPadOS
-    const blob = await r2.blob();
-    return blob.arrayBuffer();
+
+    if (this.proxyUrl) {
+      // Прокси возвращает base64 JSON — Safari пропускает текст без проблем
+      const json = await r2.json();
+      if (json.error) throw new Error('Прокси: ' + json.error);
+      if (!json.b64)  throw new Error('Прокси не вернул данные файла');
+      return _b64ToArrayBuffer(json.b64);
+    } else {
+      // Прямое скачивание (Chrome/Mac) — blob надёжнее arrayBuffer
+      const blob = await r2.blob();
+      return blob.arrayBuffer();
+    }
   }
 
   static formatSize(bytes) {
