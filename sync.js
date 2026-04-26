@@ -179,12 +179,29 @@ class SyncClient {
 
 // ── TELEGRAM SYNC ─────────────────────────────────────────────
 class TelegramSync {
-  constructor(botToken) {
-    this.token = botToken;
-    this._base = `https://api.telegram.org/bot${botToken}`;
+  // proxyUrl: Cloudflare Worker URL — нужен на iPhone/Safari из-за CORS
+  constructor(botToken, proxyUrl = null) {
+    this.token    = botToken;
+    this.proxyUrl = proxyUrl ? proxyUrl.replace(/\/$/, '') : null;
   }
 
-  // Вспомогательный fetch с таймаутом
+  // Строим URL для Bot API — напрямую или через прокси
+  _apiUrl(path) {
+    const direct = `https://api.telegram.org/bot${this.token}${path}`;
+    return this.proxyUrl
+      ? `${this.proxyUrl}?url=${encodeURIComponent(direct)}`
+      : direct;
+  }
+
+  // Строим URL для скачивания файла
+  _fileUrl(filePath) {
+    const direct = `https://api.telegram.org/file/bot${this.token}/${filePath}`;
+    return this.proxyUrl
+      ? `${this.proxyUrl}?url=${encodeURIComponent(direct)}`
+      : direct;
+  }
+
+  // Fetch с таймаутом
   async _tgFetch(url, opts = {}, timeoutMs = 12000) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -202,31 +219,29 @@ class TelegramSync {
   // Проверка токена
   async ping() {
     try {
-      const res = await this._tgFetch(`${this._base}/getMe`);
+      const res = await this._tgFetch(this._apiUrl('/getMe'));
       const data = await res.json();
       return data.ok === true;
     } catch { return false; }
   }
 
-  // Получить список книг из последних сообщений бота
+  // Список книг из последних сообщений бота
   async fetchFileCatalog() {
-    const res = await this._tgFetch(`${this._base}/getUpdates?limit=100&allowed_updates=%5B%22message%22%5D`);
+    const res = await this._tgFetch(
+      this._apiUrl('/getUpdates?limit=100&allowed_updates=%5B%22message%22%5D')
+    );
     if (!res.ok) throw new Error('Telegram API недоступен');
     const data = await res.json();
     if (!data.ok) throw new Error(data.description || 'Ошибка Telegram');
 
     const seen = new Set();
     const files = [];
-
     for (const update of (data.result || [])) {
       const doc = update.message?.document;
-      if (!doc) continue;
-      if (seen.has(doc.file_id)) continue;
+      if (!doc || seen.has(doc.file_id)) continue;
       seen.add(doc.file_id);
-
       const ext = (doc.file_name || '').split('.').pop().toLowerCase();
       if (!['epub', 'pdf', 'txt', 'fb2'].includes(ext)) continue;
-
       files.push({
         file_id:   doc.file_id,
         file_name: doc.file_name || 'Книга.' + ext,
@@ -234,33 +249,25 @@ class TelegramSync {
         ext,
       });
     }
-
-    // Свежие сначала
     return files.reverse();
   }
 
   // Скачать файл по file_id → ArrayBuffer
-  // proxyUrl: опциональный прокси (нужен на iPhone/Safari из-за CORS)
-  async downloadFile(file_id, proxyUrl = null) {
-    const r1 = await this._tgFetch(`${this._base}/getFile?file_id=${encodeURIComponent(file_id)}`);
+  async downloadFile(file_id) {
+    const r1 = await this._tgFetch(this._apiUrl(`/getFile?file_id=${encodeURIComponent(file_id)}`));
     if (!r1.ok) throw new Error('Ошибка получения файла');
     const j1 = await r1.json();
     if (!j1.ok || !j1.result?.file_path) {
       throw new Error('Файл недоступен — возможно, он больше 20 МБ');
     }
-
-    const tgFileUrl = `https://api.telegram.org/file/bot${this.token}/${j1.result.file_path}`;
-    // Если задан прокси — скачиваем через него (нужно для Safari/iPhone из-за CORS)
-    const downloadUrl = proxyUrl
-      ? `${proxyUrl.replace(/\/$/, '')}?url=${encodeURIComponent(tgFileUrl)}`
-      : tgFileUrl;
-
-    const r2 = await this._tgFetch(downloadUrl, {}, 60000);
-    if (!r2.ok) throw new Error(`Ошибка скачивания (${r2.status})${proxyUrl ? '' : ' — попробуй добавить Proxy URL'}`);
+    const r2 = await this._tgFetch(this._fileUrl(j1.result.file_path), {}, 60000);
+    if (!r2.ok) {
+      const hint = this.proxyUrl ? '' : ' — добавь Proxy URL для iPhone';
+      throw new Error(`Ошибка скачивания (${r2.status})${hint}`);
+    }
     return r2.arrayBuffer();
   }
 
-  // Форматирование размера
   static formatSize(bytes) {
     if (!bytes) return '';
     if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + ' КБ';

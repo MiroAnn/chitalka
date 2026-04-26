@@ -1496,9 +1496,9 @@ tags:
   async initTelegram() {
     const cfg = await this.db.getSetting('telegramConfig', null);
     if (cfg?.token) {
-      this.telegram   = new TelegramSync(cfg.token);
       this.tgBotName  = cfg.botName  || '';
       this.tgProxyUrl = cfg.proxyUrl || '';
+      this.telegram   = new TelegramSync(cfg.token, this.tgProxyUrl || null);
     }
   }
 
@@ -1534,8 +1534,10 @@ tags:
 
     let botName = '';
     try {
-      const tg = new TelegramSync(token);
-      const res = await tg._tgFetch(`https://api.telegram.org/bot${token}/getMe`);
+      const proxyUrl = document.getElementById('tg-proxy').value.trim();
+      // Создаём клиент сразу с прокси — чтобы getMe тоже шёл через него
+      const tg = new TelegramSync(token, proxyUrl || null);
+      const res = await tg._tgFetch(tg._apiUrl('/getMe'));
 
       let data;
       try { data = await res.json(); } catch { throw new Error('Не удалось прочитать ответ'); }
@@ -1545,7 +1547,6 @@ tags:
       }
 
       botName = data.result?.username || data.result?.first_name || 'бот';
-      const proxyUrl = document.getElementById('tg-proxy').value.trim();
 
       this.telegram   = tg;
       this.tgBotName  = botName;
@@ -1636,7 +1637,7 @@ tags:
     btn.textContent = '⏳'; btn.disabled = true;
 
     try {
-      const buf = await this.telegram.downloadFile(fileId, this.tgProxyUrl || null);
+      const buf = await this.telegram.downloadFile(fileId);
       const ext = fileName.split('.').pop().toLowerCase();
 
       let meta = { title: fileName.replace(/\.[^.]+$/, ''), author: '', coverUrl: null, html: null };
@@ -1800,6 +1801,8 @@ tags:
       this.tgProxyUrl = proxyUrl;
       const cfg = await this.db.getSetting('telegramConfig', {});
       await this.db.setSetting('telegramConfig', { ...cfg, proxyUrl });
+      // Пересоздаём клиент с новым прокси
+      if (cfg?.token) this.telegram = new TelegramSync(cfg.token, proxyUrl || null);
       this.showToast(proxyUrl ? 'Proxy сохранён ✓' : 'Proxy удалён');
     });
     document.getElementById('tg-modal').addEventListener('click', (e) => {
