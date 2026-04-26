@@ -445,6 +445,9 @@ class App {
     this.obsidianDir = null;   // FileSystemDirectoryHandle
     this.obsidianDirName = ''; // for display
 
+    // Obsidian: handle сохранённой директории (может требовать переразрешения)
+    this._pendingObsidianHandle = null;
+
     // EPUB
     this.epubBook = null;
     this.rendition = null;
@@ -480,6 +483,7 @@ class App {
     this.updateObsidianUI(); // адаптируем кнопку под Mac / iPad сразу
     this.registerSW();
     await this.initSync();
+    await this._restoreObsidianDir(); // пробуем восстановить сохранённую папку vault
 
     // Detect Dropbox OAuth callback (?code=...)
     const _urlParams = new URLSearchParams(window.location.search);
@@ -1157,9 +1161,10 @@ class App {
 
     this.updateAnnotationBadge();
 
-    // Auto-sync to Obsidian on Mac
-    if (this.obsidianDir) {
-      await this.syncCurrentBookToObsidian();
+    // Auto-sync to Obsidian on Mac (если есть доступ или pending handle)
+    if (this.obsidianDir || this._pendingObsidianHandle) {
+      const ok = await this._ensureObsidianPermission();
+      if (ok) await this.syncCurrentBookToObsidian();
     }
 
     this.showToast(type === 'highlight' ? '📌 Цитата сохранена' : '📝 Заметка сохранена');
@@ -1234,14 +1239,22 @@ class App {
 
   async setupObsidian() {
     if (this._isIOS || !window.showDirectoryPicker) {
-      // На iPad/iPhone — показываем меню с вариантами поделиться
-      this._showIOSObsidianMenu();
+      await this._showIOSObsidianMenu();
+      return;
+    }
+    // Если уже есть сохранённый handle — просто запрашиваем разрешение
+    if (this._pendingObsidianHandle) {
+      const ok = await this._ensureObsidianPermission();
+      if (ok) this.showToast('Доступ к Obsidian vault разрешён ✓');
+      else this.showToast('Разрешение не предоставлено');
       return;
     }
     try {
       const dir = await window.showDirectoryPicker({ mode: 'readwrite' });
       this.obsidianDir = dir;
       this.obsidianDirName = dir.name;
+      // Сохраняем handle в IndexedDB — при следующем запуске не нужно выбирать снова
+      await this.db.setSetting('obsidianDirHandle', dir);
       this.updateObsidianUI();
       this.showToast('Папка Obsidian настроена ✓');
     } catch (e) {
@@ -1249,70 +1262,122 @@ class App {
     }
   }
 
-  _showIOSObsidianMenu() {
+  async _showIOSObsidianMenu() {
     if (!this.currentBook) {
       this.showToast('Открой книгу, чтобы экспортировать заметки');
       return;
     }
-    const md = this.generateObsidianMD(this.currentBook, this.currentAnnotations);
-    const name = (this.currentBook.title || 'книга')
-      .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(0, 80) + '.md';
 
-    // Пробуем Web Share API с файлом (поддерживается iOS 15+)
-    const tryShare = async () => {
-      try {
-        const file = new File([md], name, { type: 'text/markdown' });
-        if (navigator.share && navigator.canShare?.({ files: [file] })) {
-          await navigator.share({ title: this.currentBook.title, files: [file] });
-          return true;
+    const safeTitle = (this.currentBook.title || 'книга')
+      .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(0, 80);
+    const filename = safeTitle + '.md';
+
+    // ── Пробуем Advanced URI (append / new) если vault настроен ──────────
+    const vaultName   = await this.db.getSetting('obsidianVaultName', null);
+    const timestamps  = await this.db.getSetting('obsidianExportTimestamps', {});
+    const lastExport  = timestamps[this.currentBook.id] || 0;
+
+    if (vaultName) {
+      const vEnc = encodeURIComponent(vaultName);
+      const fEnc = encodeURIComponent(filename);
+
+      if (lastExport === 0) {
+        // Первый экспорт — создаём файл целиком
+        const fullMd  = this.generateObsidianMD(this.currentBook, this.currentAnnotations);
+        const dataEnc = encodeURIComponent(fullMd);
+        const uri = `obsidian://advanced-uri?vault=${vEnc}&filepath=${fEnc}&data=${dataEnc}&mode=new`;
+        if (uri.length < 8000) {
+          window.location.href = uri;
+          timestamps[this.currentBook.id] = Date.now();
+          await this.db.setSetting('obsidianExportTimestamps', timestamps);
+          return;
         }
-      } catch (e) {
-        if (e.name === 'AbortError') return true; // пользователь отменил — ок
+        // URI слишком длинный — упадём в fallback ниже
+      } else {
+        // Последующий экспорт — только новые аннотации
+        const newAnns = this.currentAnnotations.filter(a => a.createdAt > lastExport);
+        if (newAnns.length === 0) {
+          this.showToast('Нет новых заметок с последнего экспорта');
+          return;
+        }
+        const deltaMd = this._generateAnnotationsOnlyMD(newAnns);
+        const dataEnc = encodeURIComponent(deltaMd);
+        const uri = `obsidian://advanced-uri?vault=${vEnc}&filepath=${fEnc}&data=${dataEnc}&mode=append`;
+        if (uri.length < 8000) {
+          window.location.href = uri;
+          timestamps[this.currentBook.id] = Date.now();
+          await this.db.setSetting('obsidianExportTimestamps', timestamps);
+          return;
+        }
+        // Слишком длинный — упадём в fallback
       }
-      return false;
-    };
+    }
 
-    // Пробуем скопировать в буфер
-    const tryCopy = async () => {
-      try {
-        await navigator.clipboard.writeText(md);
-        this.showToast('📋 Markdown скопирован — вставь в Obsidian');
-        return true;
-      } catch { return false; }
-    };
+    // ── Fallback 1: Web Share API с .md файлом (iOS 15+) ─────────────────
+    const md   = this.generateObsidianMD(this.currentBook, this.currentAnnotations);
+    const file = new File([md], filename, { type: 'text/markdown' });
+    try {
+      if (navigator.share && navigator.canShare?.({ files: [file] })) {
+        await navigator.share({ title: this.currentBook.title, files: [file] });
+        timestamps[this.currentBook.id] = Date.now();
+        await this.db.setSetting('obsidianExportTimestamps', timestamps);
+        return;
+      }
+    } catch (e) {
+      if (e.name === 'AbortError') return; // пользователь отменил
+    }
 
-    // Пробуем открыть через obsidian:// URI
-    const tryObsidianURI = () => {
-      const encoded = encodeURIComponent(md);
-      if (encoded.length > 10000) return false; // слишком длинный для URI
-      const encodedName = encodeURIComponent(name.replace('.md', ''));
-      window.location.href = `obsidian://new?name=${encodedName}&content=${encoded}`;
-      return true;
-    };
+    // ── Fallback 2: Копировать в буфер ─────────────────────────────────
+    try {
+      await navigator.clipboard.writeText(md);
+      this.showToast('📋 Markdown скопирован — вставь в Obsidian');
+      return;
+    } catch {}
 
-    // Последовательно пробуем варианты
-    tryShare().then(ok => {
-      if (!ok) return tryCopy();
-    }).then(ok => {
-      if (ok === false) tryObsidianURI();
-    });
+    // ── Fallback 3: obsidian://new URI ────────────────────────────────
+    const encoded = encodeURIComponent(md);
+    if (encoded.length < 10000) {
+      window.location.href = `obsidian://new?name=${encodeURIComponent(safeTitle)}&content=${encoded}`;
+    } else {
+      this.showToast('Заметки слишком длинные для URI. Введи имя vault для автоматической синхронизации.');
+    }
   }
 
   updateObsidianUI() {
-    const path  = document.getElementById('obsidian-path');
-    const setup = document.getElementById('obsidian-setup-btn');
+    const path      = document.getElementById('obsidian-path');
+    const setup     = document.getElementById('obsidian-setup-btn');
+    const vaultRow  = document.getElementById('obsidian-vault-row');
+    const vaultHint = document.getElementById('obsidian-vault-hint');
+    const vaultInput= document.getElementById('obsidian-vault-input');
+
     if (this._isIOS || !window.showDirectoryPicker) {
-      // На iPad показываем кнопку «Поделиться»
-      path.style.display = 'none';
-      if (setup) setup.textContent = '📤 Поделиться / Открыть в Obsidian';
+      // ── iPad ──────────────────────────────────────────────────────────
+      if (path) path.style.display = 'none';
+      if (setup) setup.textContent = '📤 Экспорт в Obsidian';
+      // Показываем поле vault name + подсказку про плагин
+      if (vaultRow)  vaultRow.style.display  = 'flex';
+      if (vaultHint) vaultHint.style.display = 'block';
+      // Подставляем сохранённое имя vault
+      if (vaultInput) {
+        this.db.getSetting('obsidianVaultName', '').then(name => {
+          if (name && vaultInput) vaultInput.value = name;
+        });
+      }
       return;
     }
-    if (this.obsidianDirName) {
-      path.textContent = '📂 ' + this.obsidianDirName;
-      path.style.display = 'block';
+
+    // ── Mac / Chrome ───────────────────────────────────────────────────
+    if (vaultRow)  vaultRow.style.display  = 'none';
+    if (vaultHint) vaultHint.style.display = 'none';
+
+    if (this.obsidianDir) {
+      if (path) { path.textContent = '📂 ' + this.obsidianDirName + ' · авто-сохранение ✓'; path.style.display = 'block'; }
       if (setup) setup.textContent = '🔮 Сменить папку vault';
+    } else if (this._pendingObsidianHandle) {
+      if (path) { path.textContent = '📂 ' + this.obsidianDirName + ' · нужно разрешение'; path.style.display = 'block'; }
+      if (setup) setup.textContent = '🔑 Разрешить доступ к vault';
     } else {
-      path.style.display = 'none';
+      if (path) path.style.display = 'none';
       if (setup) setup.textContent = '🔮 Указать папку Obsidian vault';
     }
   }
@@ -1343,6 +1408,12 @@ class App {
     const writable = await fileHandle.createWritable();
     await writable.write(md);
     await writable.close();
+
+    // Сохраняем время последнего экспорта для этой книги
+    const timestamps = await this.db.getSetting('obsidianExportTimestamps', {});
+    timestamps[book.id] = Date.now();
+    await this.db.setSetting('obsidianExportTimestamps', timestamps);
+
     return filename;
   }
 
@@ -1394,27 +1465,53 @@ tags:
     return md;
   }
 
+  // Только блоки аннотаций без frontmatter — для append-режима на iPad
+  _generateAnnotationsOnlyMD(annotations) {
+    if (!annotations.length) return '';
+    const sorted = [...annotations].sort((a, b) => a.createdAt - b.createdAt);
+    let md = '';
+    sorted.forEach(ann => {
+      const date = new Date(ann.createdAt).toLocaleDateString('ru-RU', {
+        day: 'numeric', month: 'long', year: 'numeric'
+      });
+      if (ann.type === 'highlight') {
+        md += `\n### 📌 Цитата — ${date}\n\n> ${ann.quote.replace(/\n/g, '\n> ')}\n\n---\n`;
+      } else {
+        md += `\n### 📝 Заметка — ${date}\n\n> ${ann.quote.replace(/\n/g, '\n> ')}\n\n`;
+        if (ann.note) md += `${ann.note}\n\n`;
+        md += `---\n`;
+      }
+    });
+    return md;
+  }
+
   async manualSyncObsidian() {
-    // На iPad — показываем меню «Поделиться / Скопировать / Открыть в Obsidian»
     if (this._isIOS || !window.showDirectoryPicker) {
-      this._showIOSObsidianMenu();
+      await this._showIOSObsidianMenu();
       return;
     }
 
+    // Восстанавливаем доступ к vault если нужно
     if (!this.obsidianDir) {
-      await this.setupObsidian();
-      if (!this.obsidianDir) return;
+      if (this._pendingObsidianHandle) {
+        const ok = await this._ensureObsidianPermission();
+        if (!ok) { this.showToast('Нет доступа к папке Obsidian'); return; }
+      } else {
+        await this.setupObsidian();
+        if (!this.obsidianDir) return;
+      }
     }
     if (!this.currentBook) return;
 
-    document.getElementById('sync-obsidian-btn').disabled = true;
+    const btn = document.getElementById('sync-obsidian-btn');
+    if (btn) btn.disabled = true;
     try {
       const filename = await this.syncBookToObsidian(this.currentBook, this.currentAnnotations);
       this.showToast(`✓ Синхронизировано: ${filename}`);
     } catch (e) {
       this.showToast('Ошибка: ' + e.message);
     }
-    document.getElementById('sync-obsidian-btn').disabled = false;
+    if (btn) btn.disabled = false;
   }
 
   // Export annotations as markdown (for iPhone — share / copy)
@@ -1490,6 +1587,41 @@ tags:
       this.syncReady = await this.sync.ping();
       this.updateSyncUI();
     }
+  }
+
+  // Восстанавливаем сохранённую папку Obsidian vault из IndexedDB (только Mac/Chrome)
+  async _restoreObsidianDir() {
+    if (this._isIOS || !window.showDirectoryPicker) return;
+    try {
+      const handle = await this.db.getSetting('obsidianDirHandle', null);
+      if (!handle || typeof handle.queryPermission !== 'function') return;
+      this.obsidianDirName = handle.name;
+      const perm = await handle.queryPermission({ mode: 'readwrite' });
+      if (perm === 'granted') {
+        // Разрешение уже есть — авто-синк работает сразу
+        this.obsidianDir = handle;
+      } else {
+        // Разрешение нужно запросить (браузер требует жест пользователя)
+        this._pendingObsidianHandle = handle;
+      }
+      this.updateObsidianUI();
+    } catch {}
+  }
+
+  // Запрашиваем разрешение на доступ к vault (вызывать только из обработчика клика)
+  async _ensureObsidianPermission() {
+    if (this.obsidianDir) return true;
+    if (!this._pendingObsidianHandle) return false;
+    try {
+      const perm = await this._pendingObsidianHandle.requestPermission({ mode: 'readwrite' });
+      if (perm === 'granted') {
+        this.obsidianDir = this._pendingObsidianHandle;
+        this._pendingObsidianHandle = null;
+        this.updateObsidianUI();
+        return true;
+      }
+    } catch {}
+    return false;
   }
 
   updateSyncUI() {
@@ -1998,6 +2130,14 @@ tags:
     }
   }
 
+  async saveVaultName() {
+    const input = document.getElementById('obsidian-vault-input');
+    const name  = input?.value.trim();
+    if (!name) { this.showToast('Введи имя vault'); return; }
+    await this.db.setSetting('obsidianVaultName', name);
+    this.showToast('✓ Vault сохранён: ' + name);
+  }
+
   // ── EVENT BINDINGS ────────────────────────────────────────
   bindEvents() {
     // Безопасный addEventListener — не крашит если элемент отсутствует
@@ -2149,9 +2289,14 @@ tags:
     });
 
     // Annotations panel
-    on('sync-obsidian-btn',  'click', () => this.manualSyncObsidian());
-    on('obsidian-setup-btn', 'click', () => this.setupObsidian());
-    on('obsidian-global-btn','click', () => this.setupObsidian());
+    on('sync-obsidian-btn',   'click', () => this.manualSyncObsidian());
+    on('obsidian-setup-btn',  'click', () => this.setupObsidian());
+    on('obsidian-global-btn', 'click', () => this.setupObsidian());
+    on('obsidian-vault-save', 'click', () => this.saveVaultName());
+    // Сохранение по Enter в поле vault
+    on('obsidian-vault-input', 'keydown', (e) => {
+      if (e.key === 'Enter') this.saveVaultName();
+    });
 
     // Sync settings UI on open
     on('reader-settings-btn', 'click', () => this.syncSettingsUI());

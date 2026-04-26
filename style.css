@@ -781,6 +781,31 @@ mark.reader-highlight-note:hover { background: rgba(100, 160, 255, 0.45); }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.obsidian-vault-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  width: 100%;
+}
+.obsidian-vault-row .sync-input {
+  flex: 1;
+  margin: 0;
+  font-size: 13px;
+  padding: 7px 10px;
+}
+.obsidian-vault-row .btn-primary {
+  white-space: nowrap;
+  padding: 7px 14px;
+  font-size: 13px;
+}
+.obsidian-vault-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+  margin: 6px 0 0;
+  line-height: 1.5;
+}
 
 /* ── NOTE MODAL ──────────────────────────────────────────── */
 #note-modal {
