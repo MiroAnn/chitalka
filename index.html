@@ -10,6 +10,7 @@
   <link rel="manifest" href="manifest.json">
   <link rel="apple-touch-icon" href="icon.svg">
   <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📚</text></svg>">
   <title>Читалка</title>
 </head>
 <body class="theme-sepia">
@@ -19,6 +20,7 @@
     <header class="lib-header">
       <h1>📚 Читалка</h1>
       <div class="header-actions">
+        <button class="icon-btn" id="sync-open-btn" title="Синхронизация">☁️</button>
         <button class="icon-btn" id="obsidian-global-btn" title="Настроить Obsidian">🔮</button>
         <button class="icon-btn" id="global-settings-btn" title="Настройки">⚙️</button>
       </div>
@@ -145,15 +147,67 @@
     Перетащи книгу сюда
   </div>
 
+  <!-- ══ ANNOTATION POPOVER ══════════════════════════════════ -->
+  <div id="ann-popover">
+    <div class="ann-popover-quote" id="ann-popover-quote"></div>
+    <div class="ann-popover-note" id="ann-popover-note"></div>
+    <div class="ann-popover-actions">
+      <button class="ann-popover-type" id="ann-popover-type"></button>
+      <button class="ann-popover-del" id="ann-popover-del">Удалить</button>
+    </div>
+  </div>
+
   <!-- ══ TOAST ═════════════════════════════════════════════ -->
   <div id="toast"></div>
 
   <!-- ══ HIDDEN FILE INPUT ════════════════════════════════ -->
   <input type="file" id="file-input" accept=".epub,.pdf,.txt,.fb2" style="display:none" multiple>
 
+  <!-- ══ SYNC MODAL ═══════════════════════════════════════════ -->
+  <div id="sync-modal">
+    <div class="sync-modal-inner">
+      <div class="sync-modal-header">
+        <h3>☁️ Синхронизация</h3>
+        <button class="icon-btn" id="sync-modal-close">✕</button>
+      </div>
+
+      <div id="sync-status-row" style="display:none">
+        <div class="sync-status-dot" id="sync-status-dot"></div>
+        <span id="sync-status-text">Подключено</span>
+        <button class="sync-disconnect-btn" id="sync-disconnect-btn">Отключить</button>
+      </div>
+
+      <div id="sync-setup-form">
+        <p class="sync-hint">Синхронизация через GitHub Gist — бесплатно, без карты. Нужен только GitHub-аккаунт.</p>
+
+        <label class="sync-label">GitHub Token <span class="sync-hint-inline">(Personal Access Token)</span></label>
+        <input class="sync-input" id="sync-token" type="password" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" autocomplete="off">
+
+        <label class="sync-label">Код синхронизации <span class="sync-hint-inline">(придумай сама — одинаковый на всех устройствах)</span></label>
+        <input class="sync-input" id="sync-code" type="text" placeholder="например: ann-reader" autocomplete="off">
+
+        <button class="btn-primary" id="sync-connect-btn" style="margin-top:14px">Подключить</button>
+
+        <details class="sync-details">
+          <summary>Как получить GitHub Token (2 минуты)</summary>
+          <ol class="sync-steps">
+            <li>Зайди на <strong>github.com</strong> → Settings (аватарка → Settings)</li>
+            <li>Developer settings → Personal access tokens → <strong>Tokens (classic)</strong></li>
+            <li>Generate new token → поставь галочку только на <strong>gist</strong></li>
+            <li>Скопируй токен и вставь выше</li>
+            <li>На iPhone/iPad — введи тот же токен и тот же код синхронизации</li>
+          </ol>
+          <p class="sync-hint" style="margin-top:8px;margin-bottom:0">
+            Приложение создаст приватный Gist <code>читалка-{код}</code> и будет хранить там позиции и заметки.
+          </p>
+        </details>
+      </div>
+    </div>
+  </div>
+
   <!-- ══ SCRIPTS ═══════════════════════════════════════════ -->
-  <!-- epub.js -->
-  <script src="https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js"></script>
+  <!-- JSZip (для EPUB) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <!-- pdf.js -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <script>
@@ -162,6 +216,7 @@
         'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
     }
   </script>
+  <script src="sync.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

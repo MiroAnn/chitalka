@@ -346,13 +346,98 @@ html, body {
   padding: 12px 0;
 }
 
+/* Цитата (highlight) */
 mark.reader-highlight {
   background: var(--highlight);
   border-radius: 3px;
-  padding: 0 1px;
+  padding: 1px 2px;
   cursor: pointer;
+  transition: background 0.15s;
+  border-bottom: 2px solid rgba(180, 140, 30, 0.5);
 }
-mark.reader-highlight:hover { background: rgba(255, 180, 50, 0.55); }
+mark.reader-highlight:hover { background: rgba(255, 190, 60, 0.6); }
+
+/* Заметка (note) — другой цвет */
+mark.reader-highlight-note {
+  background: rgba(120, 180, 255, 0.28);
+  border-bottom: 2px solid rgba(80, 130, 220, 0.5);
+}
+mark.reader-highlight-note:hover { background: rgba(100, 160, 255, 0.45); }
+
+.theme-dark mark.reader-highlight       { background: rgba(200, 160, 50, 0.28); border-color: rgba(200,160,50,0.6); }
+.theme-dark mark.reader-highlight-note  { background: rgba(80, 140, 220, 0.28); border-color: rgba(80,140,220,0.6); }
+
+/* ── ANNOTATION POPOVER ──────────────────────────────────── */
+#ann-popover {
+  position: fixed;
+  z-index: 500;
+  width: 300px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.18);
+  padding: 14px 16px 12px;
+  display: none;
+  animation: fadeInUp 0.15s ease;
+  pointer-events: all;
+}
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.ann-popover-quote {
+  font-family: var(--font-read);
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-muted);
+  border-left: 3px solid var(--accent-2);
+  padding-left: 10px;
+  margin-bottom: 8px;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.ann-popover-note {
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--text);
+  margin-bottom: 10px;
+  display: none;
+  white-space: pre-wrap;
+}
+
+.ann-popover-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.ann-popover-type {
+  font-size: 12px;
+  color: var(--text-muted);
+  background: var(--bg);
+  border: none;
+  border-radius: 8px;
+  padding: 4px 10px;
+  cursor: default;
+}
+
+.ann-popover-del {
+  font-size: 12px;
+  color: #e74c3c;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 8px;
+  transition: background 0.12s;
+}
+.ann-popover-del:hover { background: rgba(231,76,60,0.1); }
 
 /* EPUB container */
 #epub-container {
@@ -893,7 +978,8 @@ mark.reader-highlight:hover { background: rgba(255, 180, 50, 0.55); }
   border-radius: 24px;
   font-size: 14px;
   font-weight: 500;
-  white-space: nowrap;
+  white-space: normal;
+  text-align: center;
   opacity: 0;
   transition: opacity 0.2s, transform 0.2s;
   pointer-events: none;
@@ -905,6 +991,7 @@ mark.reader-highlight:hover { background: rgba(255, 180, 50, 0.55); }
 #toast.show {
   opacity: 1;
   transform: translateX(-50%) translateY(0);
+  pointer-events: auto;
 }
 
 /* ── LOADING ─────────────────────────────────────────────── */
@@ -952,6 +1039,100 @@ mark.reader-highlight:hover { background: rgba(255, 180, 50, 0.55); }
   pointer-events: none;
 }
 .dragover-hint.show { display: flex; }
+
+/* ── SYNC MODAL ──────────────────────────────────────────── */
+#sync-modal {
+  position: fixed; inset: 0;
+  z-index: 300;
+  display: none;
+  align-items: flex-end;
+  justify-content: center;
+  background: var(--modal-overlay);
+}
+#sync-modal.open { display: flex; }
+
+.sync-modal-inner {
+  background: var(--surface);
+  border-radius: 20px 20px 0 0;
+  width: 100%; max-width: 560px;
+  padding: 20px 20px 40px;
+  max-height: 90vh;
+  overflow-y: auto;
+  animation: slideUp 0.25s ease;
+}
+.sync-modal-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 16px;
+}
+.sync-modal-header h3 { font-size: 17px; font-weight: 700; }
+
+.sync-hint {
+  font-size: 13px; color: var(--text-muted); line-height: 1.5;
+  margin-bottom: 16px;
+}
+.sync-hint-inline { font-weight: 400; color: var(--text-muted); }
+
+.sync-label {
+  display: block;
+  font-size: 12px; font-weight: 600; color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: 0.4px;
+  margin-bottom: 6px; margin-top: 14px;
+}
+.sync-input {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 14px;
+  background: var(--bg); color: var(--text);
+  outline: none;
+  transition: border-color 0.15s;
+}
+.sync-input:focus { border-color: var(--accent); }
+
+.sync-status-row {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--bg); border-radius: 12px;
+  padding: 12px 14px; margin-bottom: 16px;
+  border: 1px solid var(--border);
+}
+.sync-status-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: #2ecc71; flex-shrink: 0;
+}
+.sync-status-dot.error   { background: #e74c3c; }
+.sync-status-dot.syncing { background: #f39c12; animation: syncpulse 1s infinite; }
+@keyframes syncpulse { 0%,100% { opacity:1; } 50% { opacity:.3; } }
+#sync-status-text { flex: 1; font-size: 13px; color: var(--text); }
+.sync-disconnect-btn {
+  font-size: 12px; color: var(--text-muted);
+  background: none; border: none; cursor: pointer;
+  padding: 4px 8px; border-radius: 6px; transition: background 0.15s;
+}
+.sync-disconnect-btn:hover { background: var(--border); }
+
+.sync-details {
+  margin-top: 20px; border: 1px solid var(--border);
+  border-radius: 12px; padding: 12px 14px;
+}
+.sync-details summary {
+  font-size: 13px; cursor: pointer; color: var(--text-muted); user-select: none;
+}
+.sync-steps {
+  font-size: 13px; line-height: 1.8; color: var(--text);
+  padding-left: 18px; margin: 10px 0;
+}
+.sync-copy-sql-btn {
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 12px; font-size: 12px;
+  cursor: pointer; color: var(--text); margin-bottom: 8px;
+}
+.sync-sql {
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 8px; padding: 12px; font-size: 11px;
+  line-height: 1.5; overflow-x: auto; white-space: pre;
+  color: var(--text); margin: 0;
+}
 
 /* ── SCROLLBARS ──────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }

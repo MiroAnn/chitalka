@@ -233,6 +233,192 @@ function parseTXT(buffer) {
 }
 
 // ─────────────────────────────────────────────────────────────
+//  EPUB NATIVE PARSER  (uses JSZip, no iframe)
+// ─────────────────────────────────────────────────────────────
+async function parseEPUBNative(buffer) {
+  if (typeof JSZip === 'undefined') throw new Error('JSZip не загружен — проверь интернет');
+
+  const zip = await JSZip.loadAsync(buffer);
+
+  // 1. Read META-INF/container.xml → find OPF path
+  const containerFile = zip.file('META-INF/container.xml');
+  if (!containerFile) throw new Error('Не найден container.xml — файл не является корректным EPUB');
+  const containerXml = await containerFile.async('text');
+  const containerDoc = new DOMParser().parseFromString(containerXml, 'application/xml');
+  const opfPath = containerDoc.querySelector('rootfile')?.getAttribute('full-path');
+  if (!opfPath) throw new Error('Не найден путь к OPF');
+
+  // 2. Parse OPF
+  const opfFile = zip.file(opfPath);
+  if (!opfFile) throw new Error('OPF файл не найден: ' + opfPath);
+  const opfXml = await opfFile.async('text');
+  const opfDoc = new DOMParser().parseFromString(opfXml, 'application/xml');
+
+  // Metadata
+  const title = (
+    opfDoc.querySelector('title')?.textContent ||
+    opfDoc.getElementsByTagNameNS('http://purl.org/dc/elements/1.1/', 'title')[0]?.textContent ||
+    'EPUB'
+  ).trim();
+  const author = (
+    opfDoc.querySelector('creator')?.textContent ||
+    opfDoc.getElementsByTagNameNS('http://purl.org/dc/elements/1.1/', 'creator')[0]?.textContent ||
+    ''
+  ).trim();
+
+  // Base dir for resolving relative paths
+  const opfDir = opfPath.includes('/')
+    ? opfPath.split('/').slice(0, -1).join('/') + '/'
+    : '';
+
+  // Manifest: id → {href, type, fullPath}
+  const manifest = {};
+  opfDoc.querySelectorAll('manifest item').forEach(item => {
+    const id   = item.getAttribute('id');
+    const href = item.getAttribute('href');
+    const type = item.getAttribute('media-type') || '';
+    if (id && href) manifest[id] = { href, type, fullPath: opfDir + decodeURIComponent(href) };
+  });
+
+  // Spine: reading order
+  const spineIds = Array.from(opfDoc.querySelectorAll('spine itemref'))
+    .map(el => el.getAttribute('idref'))
+    .filter(Boolean);
+
+  // 3. Cover image (best-effort)
+  let coverUrl = null;
+  try {
+    const coverId = opfDoc.querySelector('meta[name="cover"]')?.getAttribute('content');
+    const coverItem = coverId && manifest[coverId]
+      ? manifest[coverId]
+      : Object.values(manifest).find(m =>
+          m.type?.startsWith('image/') &&
+          (m.href.toLowerCase().includes('cover') || m.fullPath.toLowerCase().includes('cover'))
+        );
+    if (coverItem) {
+      const f = zip.file(coverItem.fullPath) || zip.file(opfDir + coverItem.href);
+      if (f) {
+        const b64 = await f.async('base64');
+        coverUrl = `data:${coverItem.type || 'image/jpeg'};base64,${b64}`;
+      }
+    }
+  } catch {}
+
+  // 4. Process spine chapters → combined HTML
+  function nodeToHtml(node) {
+    if (node.nodeType === 3) { // text
+      return escHtml(node.textContent);
+    }
+    const tag = node.nodeName.toLowerCase();
+    const kids = Array.from(node.childNodes).map(nodeToHtml).join('');
+
+    if (tag === 'p')   return `<p>${kids}</p>`;
+    if (tag === 'br')  return '<br>';
+    if (tag === 'hr')  return '<hr>';
+    if (/^h[1-6]$/.test(tag)) return `<h2 class="chapter-title">${kids}</h2>`;
+    if (tag === 'blockquote' || tag === 'cite') return `<blockquote>${kids}</blockquote>`;
+    if (tag === 'em' || tag === 'i')    return `<em>${kids}</em>`;
+    if (tag === 'strong' || tag === 'b') return `<strong>${kids}</strong>`;
+    if (tag === 'sup') return `<sup>${kids}</sup>`;
+    if (tag === 'sub') return `<sub>${kids}</sub>`;
+    if (tag === 'img' || tag === 'image') return ''; // skip images
+    if (tag === 'script' || tag === 'style' || tag === 'link') return '';
+    return kids; // div, span, section, article, nav → just children
+  }
+
+  let html = '';
+  for (const id of spineIds) {
+    const item = manifest[id];
+    if (!item) continue;
+    if (!item.type.includes('html') && !item.type.includes('xhtml') && !item.type.includes('xml')) continue;
+
+    const f = zip.file(item.fullPath);
+    if (!f) continue;
+
+    const raw = await f.async('text');
+    const doc = new DOMParser().parseFromString(raw, 'text/html');
+    doc.querySelectorAll('script,style,link,meta,nav').forEach(el => el.remove());
+    const body = doc.querySelector('body');
+    if (body) {
+      html += Array.from(body.childNodes).map(nodeToHtml).join('\n');
+      html += '\n<p>&nbsp;</p>\n'; // chapter separator
+    }
+  }
+
+  if (!html.trim()) throw new Error('EPUB не содержит текстового контента');
+  return { title, author, html, coverUrl };
+}
+
+// ─────────────────────────────────────────────────────────────
+//  TEXT HIGHLIGHT HELPERS
+// ─────────────────────────────────────────────────────────────
+
+/** Находит диапазон текста в DOM-контейнере через TreeWalker */
+function findTextRange(container, searchText) {
+  if (!searchText || searchText.length < 2 || !container) return null;
+
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  let totalText = '';
+  let node;
+  while ((node = walker.nextNode())) {
+    // пропускаем текст внутри самих mark-элементов при переиндексации
+    nodes.push({ node, start: totalText.length });
+    totalText += node.textContent;
+  }
+
+  const idx = totalText.indexOf(searchText);
+  if (idx === -1) return null;
+  const endIdx = idx + searchText.length;
+
+  let startNode = null, startOff = 0, endNode = null, endOff = 0;
+  for (const { node, start } of nodes) {
+    const end = start + node.textContent.length;
+    if (!startNode && endIdx > start && idx < end) {
+      startNode = node;
+      startOff = Math.max(0, idx - start);
+    }
+    if (startNode && endIdx <= end) {
+      endNode = node;
+      endOff = endIdx - start;
+      break;
+    }
+  }
+  if (!startNode || !endNode) return null;
+
+  const range = document.createRange();
+  range.setStart(startNode, startOff);
+  range.setEnd(endNode, endOff);
+  return range;
+}
+
+/** Оборачивает range в <mark> с данными аннотации */
+function applyHighlightRange(range, annId, type) {
+  const mark = document.createElement('mark');
+  mark.className = 'reader-highlight' + (type === 'note' ? ' reader-highlight-note' : '');
+  mark.dataset.annId = String(annId);
+  try {
+    range.surroundContents(mark);
+  } catch {
+    try {
+      mark.appendChild(range.extractContents());
+      range.insertNode(mark);
+    } catch { return false; }
+  }
+  return true;
+}
+
+/** Снимает выделение с mark-элемента (при удалении аннотации) */
+function removeHighlightMark(annId) {
+  const mark = document.querySelector(`mark.reader-highlight[data-ann-id="${annId}"]`);
+  if (!mark) return;
+  const parent = mark.parentNode;
+  while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+  parent.removeChild(mark);
+  parent.normalize();
+}
+
+// ─────────────────────────────────────────────────────────────
 //  COLOUR PALETTES FOR GENERATED COVERS
 // ─────────────────────────────────────────────────────────────
 const COVER_PALETTES = [
@@ -274,6 +460,10 @@ class App {
 
     // Settings
     this.settings = { theme: 'sepia', fontSize: 19, lineHeight: 1.8 };
+
+    // Sync
+    this.sync = null;         // SyncClient instance
+    this.syncReady = false;
   }
 
   // ── INIT ──────────────────────────────────────────────────
@@ -283,6 +473,7 @@ class App {
     this.applyTheme();
     this.bindEvents();
     this.registerSW();
+    await this.initSync();
     await this.renderLibrary();
   }
 
@@ -400,8 +591,8 @@ class App {
           const parsed = parseFB2(buf);
           meta = { ...meta, ...parsed };
         } else if (ext === 'epub') {
-          meta.title = file.name.replace(/\.epub$/i, '');
-          // Will extract cover/metadata lazily on open
+          const parsed = await parseEPUBNative(buf);
+          meta = { ...meta, ...parsed };
         }
         // pdf: just store, title = filename
 
@@ -447,9 +638,15 @@ class App {
     this.updateAnnotationBadge();
 
     try {
+      // Получаем удалённую позицию до открытия (параллельно)
+      const remoteProgressPromise = this.fetchRemoteProgress(book);
+
       if (book.format === 'epub') await this.renderEPUB(book);
       else if (book.format === 'pdf') await this.renderPDF(book);
       else await this.renderText(book);
+
+      // Предлагаем перейти к удалённой позиции если она свежее
+      this._offerRemotePosition(book, await remoteProgressPromise);
     } catch (err) {
       document.getElementById('reader-loading').innerHTML =
         `<p style="color:var(--accent-2);padding:20px;text-align:center">
@@ -459,187 +656,15 @@ class App {
   }
 
   destroyReader() {
-    if (this.rendition) {
-      try { this.rendition.destroy(); } catch {}
-      this.rendition = null;
-    }
-    if (this.epubBook) {
-      try { this.epubBook.destroy(); } catch {}
-      this.epubBook = null;
-    }
     this.pdfDoc = null;
     const body = document.getElementById('reader-body');
     body.innerHTML = `<div class="loading" id="reader-loading"><div class="spinner"></div><span>Загрузка…</span></div>`;
   }
 
   // ── EPUB RENDERER ─────────────────────────────────────────
+  // EPUB теперь парсится через JSZip и рендерится как текст
   async renderEPUB(book) {
-    if (typeof ePub === 'undefined') {
-      throw new Error('epub.js не загружен — проверь соединение с интернетом');
-    }
-
-    // Helper: races a promise against a timeout
-    const withTimeout = (promise, ms, label) => Promise.race([
-      promise,
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error(`Не отвечает: ${label} (${ms/1000}с)`)), ms)
-      )
-    ]);
-
-    const setStatus = (msg) => {
-      const el = document.querySelector('#reader-loading span');
-      if (el) el.textContent = msg;
-    };
-
-    setStatus('Открываю EPUB…');
-
-    const blob = new Blob([book.content], { type: 'application/epub+zip' });
-    const url = URL.createObjectURL(blob);
-    this.epubBook = ePub(url);
-
-    // Listen for errors from epub.js
-    this.epubBook.on('openFailed', (err) => {
-      URL.revokeObjectURL(url);
-      throw new Error('Не удалось открыть EPUB: ' + (err?.message || err));
-    });
-
-    // Wait for book ready (spine + metadata)
-    setStatus('Разбираю структуру…');
-    try {
-      await withTimeout(this.epubBook.ready, 12000, 'готовность книги');
-    } catch (e) {
-      URL.revokeObjectURL(url);
-      throw new Error('EPUB не загружается. Файл может быть повреждён или иметь нестандартный формат.');
-    }
-
-    // Extract metadata (non-blocking)
-    const meta = await Promise.race([
-      this.epubBook.loaded.metadata,
-      new Promise(r => setTimeout(() => r({}), 3000))
-    ]).catch(() => ({}));
-
-    if (meta.title && meta.title !== book.title) {
-      await this.db.updateBook(book.id, { title: meta.title, author: meta.creator || '' });
-      document.getElementById('reader-title').textContent = meta.title;
-      this.currentBook.title = meta.title;
-    }
-
-    // Extract cover (non-blocking, best-effort)
-    if (!book.coverUrl) {
-      Promise.race([
-        this.epubBook.coverUrl(),
-        new Promise(r => setTimeout(() => r(null), 3000))
-      ]).then(coverUrl => {
-        if (coverUrl) this.db.updateBook(book.id, { coverUrl });
-      }).catch(() => {});
-    }
-
-    // Build container
-    const container = document.createElement('div');
-    container.id = 'epub-container';
-    container.style.cssText = 'width:100%;height:100%;';
-
-    const body = document.getElementById('reader-body');
-    body.innerHTML = '';
-    body.appendChild(container);
-
-    // Swipe nav arrows
-    const epubNav = document.createElement('div');
-    epubNav.className = 'epub-nav';
-    epubNav.innerHTML = `
-      <button class="epub-nav-btn" id="epub-prev" title="Назад">‹</button>
-      <button class="epub-nav-btn" id="epub-next" title="Вперёд">›</button>
-    `;
-    body.appendChild(epubNav);
-
-    setStatus('Рендерю страницы…');
-
-    this.rendition = this.epubBook.renderTo(container, {
-      width: '100%',
-      height: '100%',
-      spread: 'none',
-      flow: 'paginated',
-    });
-
-    // Restore position
-    const savedCFI = await this.db.getSetting(`pos-${book.id}`, null);
-
-    try {
-      await withTimeout(
-        this.rendition.display(savedCFI || undefined),
-        15000,
-        'отображение страницы'
-      );
-    } catch (e) {
-      // Try without saved position
-      if (savedCFI) {
-        try {
-          await withTimeout(this.rendition.display(), 10000, 'отображение (fallback)');
-        } catch {
-          URL.revokeObjectURL(url);
-          throw new Error('EPUB не открывается. Попробуй пересохранить файл в другом приложении.');
-        }
-      } else {
-        URL.revokeObjectURL(url);
-        throw new Error('EPUB не открывается. Файл может быть повреждён.');
-      }
-    }
-
-    // Theme / font for iframe content
-    this.applyEpubTheme();
-
-    // Navigation buttons
-    document.getElementById('epub-prev')?.addEventListener('click', () => this.rendition.prev());
-    document.getElementById('epub-next')?.addEventListener('click', () => this.rendition.next());
-
-    // Selection events
-    this.rendition.on('selected', (cfiRange, contents) => {
-      const text = contents.window.getSelection().toString().trim();
-      if (text.length > 1) {
-        this.pendingSelection = { text, context: { type: 'epub', cfi: cfiRange } };
-        const iframeRect = container.getBoundingClientRect();
-        this.showSelectionBar(iframeRect.left + iframeRect.width / 2, iframeRect.top + 120);
-      }
-    });
-
-    this.rendition.on('relocated', (loc) => {
-      const pct = loc.start.percentage || 0;
-      this.updateProgress(pct);
-      this.db.updateBook(book.id, { progress: pct });
-      this.db.setSetting(`pos-${book.id}`, loc.start.cfi);
-    });
-
-    // Keyboard navigation
-    this.rendition.on('keyup', (e) => {
-      if (e.key === 'ArrowRight') this.rendition.next();
-      if (e.key === 'ArrowLeft') this.rendition.prev();
-    });
-
-    document.getElementById('reader-footer').style.display = 'flex';
-  }
-
-  applyEpubTheme() {
-    if (!this.rendition) return;
-    const isDark = this.settings.theme === 'dark';
-    const isSepia = this.settings.theme === 'sepia';
-    const bg = isDark ? '#18181b' : isSepia ? '#f8f3e8' : '#ffffff';
-    const fg = isDark ? '#e4d5bb' : isSepia ? '#3d2b1f' : '#1a1a1a';
-
-    this.rendition.themes.register('reader', {
-      body: {
-        background: bg + ' !important',
-        color: fg + ' !important',
-        'font-family': 'Georgia, serif !important',
-        'font-size': this.settings.fontSize + 'px !important',
-        'line-height': this.settings.lineHeight + ' !important',
-        'max-width': '680px',
-        margin: '0 auto',
-        padding: '20px 24px !important',
-      },
-      p: { margin: '0 0 1em', 'text-align': 'justify', hyphens: 'auto' },
-      'h1,h2,h3': { 'font-family': 'system-ui, sans-serif', color: isDark ? '#c9a96e' : isSepia ? '#5c3d1e' : '#2c6e49' },
-    });
-    this.rendition.themes.select('reader');
+    return this.renderText(book);
   }
 
   // ── PDF RENDERER ──────────────────────────────────────────
@@ -784,13 +809,14 @@ class App {
     const pct = (next - 1) / Math.max(1, this.pdfTotalPages - 1);
     this.updateProgress(pct);
     this.db.updateBook(this.currentBook.id, { progress: pct });
+    this.pushProgress(this.currentBook, pct);
   }
 
   // ── TEXT (TXT / FB2) RENDERER ─────────────────────────────
   async renderText(book) {
     let html = book.html;
 
-    // If stored html is missing (e.g. old record), re-parse
+    // If stored html is missing, re-parse
     if (!html && book.format === 'txt') {
       const parsed = parseTXT(book.content);
       html = parsed.html;
@@ -802,6 +828,17 @@ class App {
       await this.db.updateBook(book.id, {
         html, title: parsed.title, author: parsed.author, coverUrl: parsed.coverUrl
       });
+    }
+    if (!html && book.format === 'epub') {
+      const loadingEl = document.getElementById('reader-loading');
+      if (loadingEl) loadingEl.querySelector('span').textContent = 'Разбираю EPUB…';
+      const parsed = await parseEPUBNative(book.content);
+      html = parsed.html;
+      await this.db.updateBook(book.id, {
+        html, title: parsed.title, author: parsed.author, coverUrl: parsed.coverUrl
+      });
+      document.getElementById('reader-title').textContent = parsed.title;
+      this.currentBook = { ...this.currentBook, ...parsed };
     }
 
     const body = document.getElementById('reader-body');
@@ -821,14 +858,18 @@ class App {
       });
     }
 
-    // Apply highlights from annotations
+    // Восстанавливаем визуальные выделения
     this.restoreTextHighlights(div);
+
+    // Поповер при клике на выделенный текст
+    this.setupAnnotationPopover(div);
 
     // Progress tracking on scroll
     div.addEventListener('scroll', () => {
       const pct = div.scrollTop / (div.scrollHeight - div.clientHeight) || 0;
       this.updateProgress(pct);
       this.db.updateBook(this.currentBook.id, { progress: pct });
+      this.pushProgress(this.currentBook, pct);
     });
 
     // Selection
@@ -840,12 +881,95 @@ class App {
   }
 
   restoreTextHighlights(container) {
-    // Simple text-based highlight restoration
-    this.currentAnnotations.forEach(ann => {
-      if (!ann.textOffset || ann.context?.type === 'epub' || ann.context?.type === 'pdf') return;
-      // For v1: we don't visually restore highlights in text (complex range logic)
-      // They are shown in the annotations panel instead
+    if (!this.currentAnnotations.length) return;
+
+    // Сортируем по убыванию длины — длинные сначала, чтобы вложения не сломали поиск
+    const sorted = [...this.currentAnnotations]
+      .filter(a => a.quote && a.quote.length >= 2 && a.context?.type !== 'pdf')
+      .sort((a, b) => b.quote.length - a.quote.length);
+
+    for (const ann of sorted) {
+      try {
+        const range = findTextRange(container, ann.quote);
+        if (range) applyHighlightRange(range, ann.id, ann.type);
+      } catch {}
+    }
+  }
+
+  // ── ANNOTATION POPOVER ────────────────────────────────────
+  setupAnnotationPopover(container) {
+    container.addEventListener('click', (e) => {
+      const mark = e.target.closest('mark.reader-highlight');
+      if (mark) {
+        e.stopPropagation();
+        const annId = parseInt(mark.dataset.annId);
+        const ann = this.currentAnnotations.find(a => a.id === annId);
+        if (ann) this.showAnnotationPopover(ann, mark);
+      } else {
+        this.hideAnnotationPopover();
+      }
     });
+
+    // Закрытие при клике вне
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('#ann-popover') && !e.target.closest('mark.reader-highlight')) {
+        this.hideAnnotationPopover();
+      }
+    });
+
+    // Кнопка «Удалить» в поповере
+    document.getElementById('ann-popover-del').addEventListener('click', async () => {
+      const annId = parseInt(document.getElementById('ann-popover-del').dataset.annId);
+      const ann = this.currentAnnotations.find(a => a.id === annId);
+      await this.db.deleteAnnotation(annId);
+      if (ann) this.pushDeleteAnnotation(this.currentBook, ann).catch(() => {});
+      this.currentAnnotations = this.currentAnnotations.filter(a => a.id !== annId);
+      removeHighlightMark(annId);
+      this.updateAnnotationBadge();
+      this.hideAnnotationPopover();
+      if (this.obsidianDir) await this.syncCurrentBookToObsidian();
+      this.showToast('Удалено');
+    });
+  }
+
+  showAnnotationPopover(ann, markEl) {
+    const popover = document.getElementById('ann-popover');
+    document.getElementById('ann-popover-quote').textContent = ann.quote;
+
+    const noteEl = document.getElementById('ann-popover-note');
+    if (ann.note) {
+      noteEl.textContent = ann.note;
+      noteEl.style.display = 'block';
+    } else {
+      noteEl.style.display = 'none';
+    }
+
+    const typeEl = document.getElementById('ann-popover-type');
+    typeEl.textContent = ann.type === 'highlight' ? '📌 Цитата' : '📝 Заметка';
+
+    const delBtn = document.getElementById('ann-popover-del');
+    delBtn.dataset.annId = ann.id;
+
+    popover.style.display = 'block';
+
+    // Позиция: над выделенным словом
+    const rect = markEl.getBoundingClientRect();
+    const pw = 300;
+    let left = rect.left + rect.width / 2 - pw / 2;
+    left = Math.max(10, Math.min(window.innerWidth - pw - 10, left));
+
+    popover.style.left = left + 'px';
+    popover.style.top = '-9999px'; // рендерим скрыто, чтобы получить высоту
+    requestAnimationFrame(() => {
+      const ph = popover.offsetHeight;
+      let top = rect.top - ph - 10;
+      if (top < 60) top = rect.bottom + 10;
+      popover.style.top = top + 'px';
+    });
+  }
+
+  hideAnnotationPopover() {
+    document.getElementById('ann-popover').style.display = 'none';
   }
 
   _handleTextSelection(e) {
@@ -855,15 +979,18 @@ class App {
     if (text.length < 2) return;
 
     let x = window.innerWidth / 2, y = 200;
+    let savedRange = null;
     try {
       const range = sel.getRangeAt(0);
       const rect = range.getBoundingClientRect();
       x = rect.left + rect.width / 2;
       y = rect.top - 10;
+      savedRange = range.cloneRange(); // сохраняем до сброса выделения
     } catch {}
 
     this.pendingSelection = {
       text,
+      range: savedRange,
       context: { type: this.currentBook?.format || 'text' }
     };
     this.showSelectionBar(x, y);
@@ -903,11 +1030,21 @@ class App {
     const id = await this.db.addAnnotation(ann);
     ann.id = id;
     this.currentAnnotations.push(ann);
+
+    // Push to remote sync
+    this.pushAnnotation(this.currentBook, ann).catch(() => {});
+
+    // Применяем визуальное выделение сразу (для TXT/FB2/EPUB)
+    const savedRange = this.pendingSelection?.range;
     this.pendingSelection = null;
     this.hideSelectionBar();
 
     // Clear browser selection
     try { window.getSelection()?.removeAllRanges(); } catch {}
+
+    if (savedRange && this.currentBook?.format !== 'pdf') {
+      try { applyHighlightRange(savedRange, id, type); } catch {}
+    }
 
     this.updateAnnotationBadge();
 
@@ -957,8 +1094,11 @@ class App {
       btn.addEventListener('click', async () => {
         const item = btn.closest('.ann-item');
         const id = parseInt(item.dataset.id);
+        const ann = this.currentAnnotations.find(a => a.id === id);
         await this.db.deleteAnnotation(id);
+        if (ann) this.pushDeleteAnnotation(this.currentBook, ann).catch(() => {});
         this.currentAnnotations = this.currentAnnotations.filter(a => a.id !== id);
+        removeHighlightMark(id);
         this.updateAnnotationBadge();
         await this.renderAnnotationsPanel();
         if (this.obsidianDir) await this.syncCurrentBookToObsidian();
@@ -1130,14 +1270,12 @@ tags:
   setTheme(theme) {
     this.settings.theme = theme;
     this.applyTheme();
-    this.applyEpubTheme();
     this.saveSettings();
   }
 
   changeFontSize(delta) {
     this.settings.fontSize = Math.max(13, Math.min(30, this.settings.fontSize + delta));
     this.applyReadingCSS();
-    this.applyEpubTheme();
     document.getElementById('font-size-label').textContent = this.settings.fontSize;
     this.saveSettings();
   }
@@ -1147,7 +1285,6 @@ tags:
       Math.max(1.2, Math.min(2.5, this.settings.lineHeight + delta))
     ) * 10) / 10;
     this.applyReadingCSS();
-    this.applyEpubTheme();
     document.getElementById('lh-label').textContent = this.settings.lineHeight.toFixed(1);
     this.saveSettings();
   }
@@ -1167,6 +1304,186 @@ tags:
     t.classList.add('show');
     clearTimeout(this._toastTimer);
     this._toastTimer = setTimeout(() => t.classList.remove('show'), duration);
+  }
+
+  // ── SYNC ──────────────────────────────────────────────────
+  async initSync() {
+    const cfg = await this.db.getSetting('syncConfig', null);
+    if (cfg?.token && cfg?.code) {
+      this.sync = new SyncClient(cfg.token, cfg.code);
+      this.syncReady = await this.sync.ping();
+      this.updateSyncUI();
+    }
+  }
+
+  updateSyncUI() {
+    const btn = document.getElementById('sync-open-btn');
+    if (btn) btn.title = this.syncReady ? 'Синхронизация ✓' : 'Синхронизация';
+  }
+
+  openSyncModal() {
+    const statusRow = document.getElementById('sync-status-row');
+    const setupForm = document.getElementById('sync-setup-form');
+
+    if (this.syncReady) {
+      statusRow.style.display = 'flex';
+      setupForm.style.display = 'none';
+      document.getElementById('sync-status-dot').className = 'sync-status-dot';
+      document.getElementById('sync-status-text').textContent = 'Синхронизация активна (GitHub Gist)';
+    } else {
+      statusRow.style.display = 'none';
+      setupForm.style.display = 'block';
+      // Подставляем сохранённый код (токен не показываем из соображений безопасности)
+      this.db.getSetting('syncConfig', null).then(cfg => {
+        if (cfg) document.getElementById('sync-code').value = cfg.code || '';
+      });
+    }
+    document.getElementById('sync-modal').classList.add('open');
+  }
+
+  closeSyncModal() {
+    document.getElementById('sync-modal').classList.remove('open');
+  }
+
+  async connectSync() {
+    const token = document.getElementById('sync-token').value.trim();
+    const code  = document.getElementById('sync-code').value.trim();
+
+    if (!token || !code) {
+      this.showToast('Введи токен и код синхронизации');
+      return;
+    }
+
+    const btn = document.getElementById('sync-connect-btn');
+    btn.textContent = 'Проверяем…';
+    btn.disabled = true;
+
+    this.sync = new SyncClient(token, code);
+    const ok = await this.sync.ping();
+
+    btn.textContent = 'Подключить';
+    btn.disabled = false;
+
+    if (ok) {
+      await this.db.setSetting('syncConfig', { token, code });
+      this.syncReady = true;
+      this.updateSyncUI();
+      this.closeSyncModal();
+      this.showToast('☁️ Синхронизация через GitHub подключена!');
+    } else {
+      this.showToast('Не удалось подключиться. Проверь токен — нужен scope "gist".');
+      this.sync = null;
+    }
+  }
+
+  async disconnectSync() {
+    this.sync = null;
+    this.syncReady = false;
+    await this.db.setSetting('syncConfig', null);
+    this.updateSyncUI();
+    this.closeSyncModal();
+    this.showToast('Синхронизация отключена');
+  }
+
+  // Убеждаемся что у книги есть hash для синхронизации
+  async ensureBookHash(book) {
+    if (book.syncHash) return book.syncHash;
+    const hash = await computeBookHash(book.content);
+    if (hash) {
+      await this.db.updateBook(book.id, { syncHash: hash });
+      this.currentBook = { ...this.currentBook, syncHash: hash };
+    }
+    return hash;
+  }
+
+  // Вызывается при открытии книги — проверяем есть ли более свежая позиция на сервере
+  async fetchRemoteProgress(book) {
+    if (!this.sync || !this.syncReady) return null;
+    try {
+      const hash = await this.ensureBookHash(book);
+      if (!hash) return null;
+      const remote = await this.sync.getProgress(hash);
+      return remote;
+    } catch { return null; }
+  }
+
+  // Сохраняем позицию (дебаунс 4с)
+  pushProgress(book, progress) {
+    if (!this.sync || !this.syncReady) return;
+    this.ensureBookHash(book).then(hash => {
+      if (hash) this.sync.saveProgressDebounced(hash, progress, 4000);
+    }).catch(() => {});
+  }
+
+  // Предлагаем перейти к удалённой позиции если она свежее локальной
+  _offerRemotePosition(book, remote) {
+    if (!remote || remote.progress == null) return;
+    const local = book.progress || 0;
+    const remotePct = remote.progress;
+
+    // Предлагаем только если разница > 1% и удалённая позиция дальше
+    if (Math.abs(remotePct - local) < 0.01) return;
+
+    const remotePctStr = Math.round(remotePct * 100) + '%';
+    const localPctStr  = Math.round(local * 100) + '%';
+
+    // Показываем тост с кнопкой «Перейти»
+    const t = document.getElementById('toast');
+    t.innerHTML = `С другого устройства: ${remotePctStr} (здесь: ${localPctStr})&nbsp;<button id="toast-jump-btn" style="background:none;border:1px solid rgba(255,255,255,.5);color:inherit;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:13px">Перейти</button>`;
+    t.classList.add('show');
+
+    clearTimeout(this._toastTimer);
+    this._toastTimer = setTimeout(() => {
+      t.classList.remove('show');
+      t.innerHTML = '';
+    }, 6000);
+
+    document.getElementById('toast-jump-btn')?.addEventListener('click', () => {
+      t.classList.remove('show');
+      t.innerHTML = '';
+
+      const format = this.currentBook?.format;
+      if (format === 'pdf') {
+        // Прыгаем на нужную страницу
+        const page = Math.max(1, Math.round(remotePct * this.pdfTotalPages));
+        const delta = page - this.pdfCurrentPage;
+        if (delta !== 0) this.changePDFPage(delta);
+      } else {
+        // Прокручиваем текстовый контент
+        const div = document.getElementById('text-content');
+        if (div) {
+          div.scrollTop = div.scrollHeight * remotePct;
+          this.updateProgress(remotePct);
+          this.db.updateBook(this.currentBook.id, { progress: remotePct });
+        }
+      }
+      this.showToast(`Перешли к позиции ${remotePctStr}`);
+    });
+  }
+
+  // Синхронизируем аннотацию после сохранения
+  async pushAnnotation(book, ann) {
+    if (!this.sync || !this.syncReady) return;
+    try {
+      const hash = await this.ensureBookHash(book);
+      if (!hash) return;
+      // Генерируем UUID для аннотации если нет
+      if (!ann.uuid) {
+        ann.uuid = crypto.randomUUID?.() || Math.random().toString(36).slice(2);
+        await this.db._req(
+          this.db._store('annotations','readwrite').put(ann)
+        );
+      }
+      await this.sync.saveAnnotation(hash, ann);
+    } catch (e) { console.warn('Sync annotation failed:', e); }
+  }
+
+  async pushDeleteAnnotation(book, ann) {
+    if (!this.sync || !this.syncReady || !ann.uuid) return;
+    try {
+      const hash = await this.ensureBookHash(book);
+      if (hash) await this.sync.deleteAnnotation(hash, ann.uuid);
+    } catch {}
   }
 
   // ── EVENT BINDINGS ────────────────────────────────────────
@@ -1290,6 +1607,16 @@ tags:
       }
     }, { passive: true });
 
+    // Sync modal (☁️ Supabase)
+    document.getElementById('sync-open-btn').addEventListener('click', () => this.openSyncModal());
+    document.getElementById('sync-modal-close').addEventListener('click', () => this.closeSyncModal());
+    document.getElementById('sync-connect-btn').addEventListener('click', () => this.connectSync());
+    document.getElementById('sync-disconnect-btn').addEventListener('click', () => this.disconnectSync());
+    // Close sync modal on backdrop click
+    document.getElementById('sync-modal').addEventListener('click', (e) => {
+      if (e.target === document.getElementById('sync-modal')) this.closeSyncModal();
+    });
+
     // Annotations panel
     document.getElementById('sync-obsidian-btn').addEventListener('click', () => this.manualSyncObsidian());
     document.getElementById('obsidian-setup-btn').addEventListener('click', () => this.setupObsidian());
@@ -1304,14 +1631,7 @@ tags:
     document.getElementById('reader-body').addEventListener('touchstart', (e) => {
       touchStartX = e.touches[0].clientX;
     }, { passive: true });
-    document.getElementById('reader-body').addEventListener('touchend', (e) => {
-      if (!this.rendition) return;
-      const dx = e.changedTouches[0].clientX - touchStartX;
-      if (Math.abs(dx) > 60) {
-        if (dx < 0) this.rendition.next();
-        else this.rendition.prev();
-      }
-    }, { passive: true });
+    document.getElementById('reader-body').addEventListener('touchend', () => {}, { passive: true });
   }
 }
 
