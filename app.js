@@ -665,8 +665,9 @@ class App {
     this.updateAnnotationBadge();
 
     try {
-      // Получаем удалённую позицию до открытия (параллельно)
-      const remoteProgressPromise = this.fetchRemoteProgress(book);
+      // Запускаем оба запроса к Gist параллельно пока рендерится книга
+      const remoteProgressPromise     = this.fetchRemoteProgress(book);
+      const remoteAnnotationsPromise  = this.fetchRemoteAnnotations(book);
 
       if (book.format === 'epub') await this.renderEPUB(book);
       else if (book.format === 'pdf') await this.renderPDF(book);
@@ -674,6 +675,10 @@ class App {
 
       // Предлагаем перейти к удалённой позиции если она свежее
       this._offerRemotePosition(book, await remoteProgressPromise);
+
+      // Подтягиваем аннотации с других устройств
+      const remoteAnns = await remoteAnnotationsPromise;
+      await this._mergeRemoteAnnotations(book, remoteAnns);
     } catch (err) {
       document.getElementById('reader-loading').innerHTML =
         `<p style="color:var(--accent-2);padding:20px;text-align:center">
@@ -690,6 +695,11 @@ class App {
     if (this._pdfSwipeEnd)   body.removeEventListener('touchend',   this._pdfSwipeEnd);
     this._pdfSwipeStart = null;
     this._pdfSwipeEnd   = null;
+    // Убираем отслеживание выделения
+    if (this._selectionChangeHandler) {
+      document.removeEventListener('selectionchange', this._selectionChangeHandler);
+      this._selectionChangeHandler = null;
+    }
     body.innerHTML = `<div class="loading" id="reader-loading"><div class="spinner"></div><span>Загрузка…</span></div>`;
   }
 
@@ -937,10 +947,37 @@ class App {
     div.addEventListener('mouseup', (e) => this._handleTextSelection(e));
     div.addEventListener('touchend', (e) => setTimeout(() => this._handleTextSelection(e), 200));
 
-    // Скрываем стандартное iOS-меню (Copy / Writing Tools) при выделении текста
+    // Скрываем нативное контекстное меню (ПКМ на десктопе)
     div.addEventListener('contextmenu', (e) => {
       const sel = window.getSelection();
       if (sel && !sel.isCollapsed) e.preventDefault();
+    });
+
+    // selectionchange: обновляем pendingSelection когда пользователь корректирует ручки на iPad
+    document.addEventListener('selectionchange', this._selectionChangeHandler = () => {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed) return;
+      const text = sel.toString().trim();
+      if (text.length < 2) return;
+
+      try {
+        const range = sel.getRangeAt(0);
+        const tc = document.getElementById('text-content');
+        if (!tc || !tc.contains(range.commonAncestorContainer)) return;
+
+        const rect = range.getBoundingClientRect();
+        this.pendingSelection = {
+          text,
+          range: range.cloneRange(),
+          context: { type: this.currentBook?.format || 'text' }
+        };
+
+        // Перемещаем нашу панель вслед за выделением (только если она уже открыта)
+        const bar = document.getElementById('selection-bar');
+        if (bar && bar.style.display === 'flex') {
+          this.showSelectionBar(rect.left + rect.width / 2, rect.top - 10);
+        }
+      } catch {}
     });
 
     document.getElementById('reader-footer').style.display = 'flex';
@@ -1061,10 +1098,9 @@ class App {
       context: { type: this.currentBook?.format || 'text' }
     };
 
-    // Снимаем нативное выделение ДО показа нашей панели —
-    // iOS не может показать меню «Copy / Writing Tools» если выделения нет.
-    // Сохранённый range остаётся у нас для последующего применения highlight.
-    try { window.getSelection()?.removeAllRanges(); } catch {}
+    // Выделение НЕ снимаем — пользователь должен иметь возможность
+    // корректировать его длину перетаскивая ручки на iPad.
+    // removeAllRanges() вызовем только когда нажмут нашу кнопку «Цитата» / «Заметка».
 
     this.showSelectionBar(x, y);
   }
@@ -1542,9 +1578,82 @@ tags:
     try {
       const hash = await this.ensureBookHash(book);
       if (!hash) return null;
-      const remote = await this.sync.getProgress(hash);
-      return remote;
+      return await this.sync.getProgress(hash);
     } catch { return null; }
+  }
+
+  // Получаем аннотации с сервера
+  async fetchRemoteAnnotations(book) {
+    if (!this.sync || !this.syncReady) return null;
+    try {
+      const hash = await this.ensureBookHash(book);
+      if (!hash) return null;
+      return await this.sync.getAnnotations(hash);
+    } catch { return null; }
+  }
+
+  // Мёрджим удалённые аннотации с локальными (добавляем то чего нет)
+  async _mergeRemoteAnnotations(book, remoteAnns) {
+    if (!remoteAnns || !remoteAnns.length) return;
+
+    // Сначала убедимся что все локальные аннотации запушены на сервер
+    await this._pushUnsynced(book);
+
+    // UUID локальных аннотаций
+    const localUuids = new Set(
+      this.currentAnnotations.map(a => a.uuid || a.ann_uuid).filter(Boolean)
+    );
+
+    // Только те что есть удалённо но нет локально
+    const toAdd = remoteAnns.filter(ra => ra.ann_uuid && !localUuids.has(ra.ann_uuid));
+    if (!toAdd.length) return;
+
+    for (const ra of toAdd) {
+      try {
+        const ann = {
+          bookId:    book.id,
+          type:      ra.type      || 'highlight',
+          quote:     ra.quote     || '',
+          note:      ra.note      || '',
+          context:   ra.context   || {},
+          createdAt: ra.created_at || Date.now(),
+          uuid:      ra.ann_uuid,
+        };
+        const id = await this.db.addAnnotation(ann);
+        ann.id = id;
+        this.currentAnnotations.push(ann);
+      } catch {}
+    }
+
+    this.updateAnnotationBadge();
+
+    // Перерисовываем подсветки в тексте
+    const tc = document.getElementById('text-content');
+    if (tc) {
+      // Добавляем только новые хайлайты (не перерисовываем все)
+      const newAnns = toAdd.map(ra => {
+        return this.currentAnnotations.find(a => a.uuid === ra.ann_uuid);
+      }).filter(Boolean);
+      for (const ann of newAnns) {
+        try {
+          const range = findTextRange(tc, ann.quote);
+          if (range) applyHighlightRange(range, ann.id, ann.type);
+        } catch {}
+      }
+    }
+
+    const n = toAdd.length;
+    const word = n === 1 ? 'заметка' : n < 5 ? 'заметки' : 'заметок';
+    this.showToast(`📝 Синхронизировано ${n} ${word} с другого устройства`);
+  }
+
+  // Пушим локальные аннотации без UUID (сохранённые до настройки синка)
+  async _pushUnsynced(book) {
+    if (!this.sync || !this.syncReady) return;
+    const unsynced = this.currentAnnotations.filter(a => !a.uuid);
+    for (const ann of unsynced) {
+      await this.pushAnnotation(book, ann).catch(() => {});
+    }
   }
 
   // Сохраняем позицию (дебаунс 4с)
@@ -1997,12 +2106,22 @@ tags:
       }
     });
 
-    // Hide selection bar on click elsewhere
+    // Hide selection bar when clicking outside it
+    // На десктопе — скрываем сразу при mousedown вне бара
     document.addEventListener('mousedown', (e) => {
       if (!e.target.closest('#selection-bar')) this.hideSelectionBar();
     });
-    document.addEventListener('touchstart', (e) => {
-      if (!e.target.closest('#selection-bar')) this.hideSelectionBar();
+    // На тачскрине — скрываем бар только если выделение исчезло (пользователь убрал его,
+    // а не начал тянуть ручку). Проверяем через небольшую задержку после touchend.
+    document.addEventListener('touchend', (e) => {
+      if (e.target.closest('#selection-bar')) return; // тап по нашему бару — не трогаем
+      setTimeout(() => {
+        const sel = window.getSelection();
+        if (!sel || sel.isCollapsed) {
+          this.hideSelectionBar();
+          this.pendingSelection = null;
+        }
+      }, 300);
     }, { passive: true });
 
     // Dropbox modal (📦)
