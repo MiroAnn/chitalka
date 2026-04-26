@@ -474,28 +474,67 @@ class App {
 
   // ── EPUB RENDERER ─────────────────────────────────────────
   async renderEPUB(book) {
-    if (typeof ePub === 'undefined') throw new Error('epub.js не загружен');
+    if (typeof ePub === 'undefined') {
+      throw new Error('epub.js не загружен — проверь соединение с интернетом');
+    }
+
+    // Helper: races a promise against a timeout
+    const withTimeout = (promise, ms, label) => Promise.race([
+      promise,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`Не отвечает: ${label} (${ms/1000}с)`)), ms)
+      )
+    ]);
+
+    const setStatus = (msg) => {
+      const el = document.querySelector('#reader-loading span');
+      if (el) el.textContent = msg;
+    };
+
+    setStatus('Открываю EPUB…');
 
     const blob = new Blob([book.content], { type: 'application/epub+zip' });
     const url = URL.createObjectURL(blob);
     this.epubBook = ePub(url);
 
-    // Try to extract metadata
-    const meta = await this.epubBook.loaded.metadata.catch(() => ({}));
+    // Listen for errors from epub.js
+    this.epubBook.on('openFailed', (err) => {
+      URL.revokeObjectURL(url);
+      throw new Error('Не удалось открыть EPUB: ' + (err?.message || err));
+    });
+
+    // Wait for book ready (spine + metadata)
+    setStatus('Разбираю структуру…');
+    try {
+      await withTimeout(this.epubBook.ready, 12000, 'готовность книги');
+    } catch (e) {
+      URL.revokeObjectURL(url);
+      throw new Error('EPUB не загружается. Файл может быть повреждён или иметь нестандартный формат.');
+    }
+
+    // Extract metadata (non-blocking)
+    const meta = await Promise.race([
+      this.epubBook.loaded.metadata,
+      new Promise(r => setTimeout(() => r({}), 3000))
+    ]).catch(() => ({}));
+
     if (meta.title && meta.title !== book.title) {
       await this.db.updateBook(book.id, { title: meta.title, author: meta.creator || '' });
       document.getElementById('reader-title').textContent = meta.title;
       this.currentBook.title = meta.title;
     }
 
-    // Try to extract cover
+    // Extract cover (non-blocking, best-effort)
     if (!book.coverUrl) {
-      try {
-        const coverUrl = await this.epubBook.coverUrl();
-        if (coverUrl) await this.db.updateBook(book.id, { coverUrl });
-      } catch {}
+      Promise.race([
+        this.epubBook.coverUrl(),
+        new Promise(r => setTimeout(() => r(null), 3000))
+      ]).then(coverUrl => {
+        if (coverUrl) this.db.updateBook(book.id, { coverUrl });
+      }).catch(() => {});
     }
 
+    // Build container
     const container = document.createElement('div');
     container.id = 'epub-container';
     container.style.cssText = 'width:100%;height:100%;';
@@ -503,6 +542,17 @@ class App {
     const body = document.getElementById('reader-body');
     body.innerHTML = '';
     body.appendChild(container);
+
+    // Swipe nav arrows
+    const epubNav = document.createElement('div');
+    epubNav.className = 'epub-nav';
+    epubNav.innerHTML = `
+      <button class="epub-nav-btn" id="epub-prev" title="Назад">‹</button>
+      <button class="epub-nav-btn" id="epub-next" title="Вперёд">›</button>
+    `;
+    body.appendChild(epubNav);
+
+    setStatus('Рендерю страницы…');
 
     this.rendition = this.epubBook.renderTo(container, {
       width: '100%',
@@ -514,10 +564,33 @@ class App {
     // Restore position
     const savedCFI = await this.db.getSetting(`pos-${book.id}`, null);
 
-    await this.rendition.display(savedCFI || undefined);
+    try {
+      await withTimeout(
+        this.rendition.display(savedCFI || undefined),
+        15000,
+        'отображение страницы'
+      );
+    } catch (e) {
+      // Try without saved position
+      if (savedCFI) {
+        try {
+          await withTimeout(this.rendition.display(), 10000, 'отображение (fallback)');
+        } catch {
+          URL.revokeObjectURL(url);
+          throw new Error('EPUB не открывается. Попробуй пересохранить файл в другом приложении.');
+        }
+      } else {
+        URL.revokeObjectURL(url);
+        throw new Error('EPUB не открывается. Файл может быть повреждён.');
+      }
+    }
 
     // Theme / font for iframe content
     this.applyEpubTheme();
+
+    // Navigation buttons
+    document.getElementById('epub-prev')?.addEventListener('click', () => this.rendition.prev());
+    document.getElementById('epub-next')?.addEventListener('click', () => this.rendition.next());
 
     // Selection events
     this.rendition.on('selected', (cfiRange, contents) => {
@@ -655,12 +728,13 @@ class App {
 
     // Fit the whole page (width AND height) then apply zoom multiplier
     const page1 = page.getViewport({ scale: 1 });
-    const padH = 48; // top+bottom padding inside container
-    const navH = 56; // nav bar height
-    const containerW = container.clientWidth || (window.innerWidth - 32);
+    const padH = 48;  // top+bottom padding inside container
+    const padX = 32;  // horizontal padding (16px each side)
+    const navH = 56;  // nav bar height
+    const containerW = container.clientWidth || (window.innerWidth - padX);
     const containerH = container.clientHeight || (window.innerHeight - 120 - navH);
 
-    const scaleW = (containerW - 32) / page1.width;
+    const scaleW = (containerW - padX) / page1.width;
     const scaleH = (containerH - padH) / page1.height;
     const fitScale = Math.min(scaleW, scaleH);
     const scale = Math.max(0.1, fitScale * this.pdfZoom);

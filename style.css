@@ -363,23 +363,54 @@ mark.reader-highlight:hover { background: rgba(255, 180, 50, 0.55); }
   background: var(--bg) !important;
 }
 
+/* EPUB nav arrows */
+.epub-nav {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 4px;
+  z-index: 5;
+}
+.epub-nav-btn {
+  pointer-events: all;
+  width: 40px; height: 80px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 28px;
+  color: var(--text-muted);
+  opacity: 0;
+  transition: opacity 0.2s;
+  border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+}
+.epub-nav:hover .epub-nav-btn,
+.epub-nav-btn:focus { opacity: 0.6; }
+.epub-nav-btn:hover { opacity: 1 !important; background: var(--border); }
+
 /* PDF container */
 #pdf-container {
   height: 100%;
-  overflow-y: auto;
+  overflow: auto;                  /* обе оси — и вертикаль, и горизонталь */
   -webkit-overflow-scrolling: touch;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  padding: 20px 0 60px;
+  align-items: flex-start;         /* flex-start, иначе при зуме нельзя доскроллить влево */
+  padding: 20px 16px 60px;
   gap: 16px;
+  min-width: min-content;          /* растягиваем контейнер под зумированную страницу */
 }
 
 .pdf-page-wrapper {
+  flex-shrink: 0;                  /* не сжимать канвас */
+  margin: 0 auto;                  /* центрировать когда страница меньше экрана */
   position: relative;
   box-shadow: var(--card-shadow);
   border-radius: 4px;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .pdf-page-wrapper canvas { display: block; }
