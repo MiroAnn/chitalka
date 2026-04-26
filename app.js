@@ -1076,9 +1076,6 @@ class App {
       context: { type: this.currentBook?.format || 'text' }
     };
 
-    // Снимаем нативное выделение — убирает iOS-меню
-    try { window.getSelection()?.removeAllRanges(); } catch {}
-
     this.showSelectionBar(x, y);
   }
 
