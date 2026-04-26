@@ -204,7 +204,7 @@ class DropboxSync {
     this.accessToken  = accessToken;
     this.refreshToken = refreshToken;
     this.clientId     = clientId;
-    this.folder       = '/Читалка';
+    this.folder       = '/chitalka';
   }
 
   // ── Redirect URI = текущая страница без query/hash ────────
