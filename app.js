@@ -952,41 +952,16 @@ class App {
 
     // Desktop: обычный mouseup
     div.addEventListener('mouseup', (e) => {
-      if (this._isIOS) return; // iOS сам генерирует mouseup — пропускаем, обработаем в touchend
+      if (this._isIOS) return;
       this._handleTextSelection(e);
     });
-
-    // iOS: перехватываем выделение СИНХРОННО в touchend —
-    // до того как iOS успевает отрисовать своё меню «Copy / Writing Tools».
-    div.addEventListener('touchend', (e) => {
-      if (!this._isIOS) return; // на десктопе обрабатывает mouseup
-      const sel = window.getSelection();
-      if (!sel || sel.isCollapsed) return;
-      const text = sel.toString().trim();
-      if (text.length < 2) { sel.removeAllRanges(); return; }
-
-      try {
-        const range = sel.getRangeAt(0);
-        const rect  = range.getBoundingClientRect();
-        const savedRange = range.cloneRange();
-
-        this.pendingSelection = {
-          text,
-          range: savedRange,
-          context: { type: this.currentBook?.format || 'text' }
-        };
-
-        // Убираем нативное выделение СИНХРОННО — меню не успевает появиться
-        sel.removeAllRanges();
-        this.showSelectionBar(rect.left + rect.width / 2, rect.top - 10);
-      } catch {}
-    }, { passive: true });
-
-    // Скрываем контекстное меню ПКМ на десктопе
     div.addEventListener('contextmenu', (e) => {
       const sel = window.getSelection();
       if (sel && !sel.isCollapsed) e.preventDefault();
     });
+
+    // iOS: кастомный long-press (user-select:none запрещает нативное выделение → меню не появляется)
+    if (this._isIOS) this._setupCustomIOSSelection(div);
 
     document.getElementById('reader-footer').style.display = 'flex';
     this.updateProgress(savedPct);
@@ -1109,6 +1084,133 @@ class App {
     this.showSelectionBar(x, y);
   }
 
+  // ── CUSTOM iOS SELECTION ──────────────────────────────────
+  // user-select:none запрещает нативное выделение → iOS не показывает меню.
+  // Мы сами реализуем long-press + drag через caretRangeFromPoint.
+
+  _setupCustomIOSSelection(container) {
+    let longPressTimer  = null;
+    let isDragging      = false;
+    let startX = 0, startY = 0;
+    let anchorRange     = null; // начало выделения при long-press
+    let lastDragAt      = 0;   // throttle обновлений при drag
+
+    // Находим позицию каретки по координатам экрана
+    const caretAt = (x, y) => {
+      if (document.caretRangeFromPoint) return document.caretRangeFromPoint(x, y);
+      if (document.caretPositionFromPoint) {
+        const pos = document.caretPositionFromPoint(x, y);
+        if (!pos) return null;
+        const r = document.createRange();
+        r.setStart(pos.offsetNode, pos.offset);
+        r.collapse(true);
+        return r;
+      }
+      return null;
+    };
+
+    // Расширяем range до границ слова
+    const expandWord = (range) => {
+      if (typeof range.expand === 'function') { range.expand('word'); return; }
+      const node = range.startContainer;
+      if (node.nodeType !== Node.TEXT_NODE) return;
+      const t = node.textContent;
+      let s = range.startOffset, e = range.startOffset;
+      while (s > 0 && /\S/.test(t[s - 1])) s--;
+      while (e < t.length && /\S/.test(t[e])) e++;
+      range.setStart(node, s);
+      range.setEnd(node, e);
+    };
+
+    // Показываем временную подсветку + нашу панель
+    const showSelection = (range) => {
+      const text = range.toString().trim();
+      if (text.length < 2) return;
+      this._applyPendingSelectionMark(range.cloneRange());
+      const rect = range.getBoundingClientRect();
+      this.pendingSelection = {
+        text,
+        range: null, // при сохранении найдём через findTextRange
+        context: { type: this.currentBook?.format || 'text' }
+      };
+      this.showSelectionBar(rect.left + rect.width / 2, rect.top - 10);
+    };
+
+    container.addEventListener('touchstart', (e) => {
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+      isDragging = false;
+      anchorRange = null;
+
+      longPressTimer = setTimeout(() => {
+        const cr = caretAt(startX, startY);
+        if (!cr || !container.contains(cr.startContainer)) return;
+        expandWord(cr);
+        anchorRange = cr.cloneRange();
+        isDragging  = true;
+        showSelection(cr);
+      }, 480);
+    }, { passive: true });
+
+    container.addEventListener('touchmove', (e) => {
+      const dx = e.touches[0].clientX - startX;
+      const dy = e.touches[0].clientY - startY;
+      if (!isDragging) {
+        if (Math.hypot(dx, dy) > 8) clearTimeout(longPressTimer);
+        return;
+      }
+      // Throttle: не чаще раза в 80мс
+      const now = Date.now();
+      if (now - lastDragAt < 80) return;
+      lastDragAt = now;
+
+      const x = e.touches[0].clientX, y = e.touches[0].clientY;
+      const endCr = caretAt(x, y);
+      if (!endCr || !container.contains(endCr.startContainer)) return;
+      try {
+        const combined = document.createRange();
+        // Определяем направление drag
+        if (anchorRange.compareBoundaryPoints(Range.START_TO_START, endCr) <= 0) {
+          combined.setStart(anchorRange.startContainer, anchorRange.startOffset);
+          combined.setEnd(endCr.startContainer, endCr.startOffset);
+        } else {
+          combined.setStart(endCr.startContainer, endCr.startOffset);
+          combined.setEnd(anchorRange.endContainer, anchorRange.endOffset);
+        }
+        if (combined.toString().trim().length >= 2) showSelection(combined);
+      } catch {}
+    }, { passive: true });
+
+    container.addEventListener('touchend', () => {
+      clearTimeout(longPressTimer);
+      isDragging  = false;
+      anchorRange = null;
+    }, { passive: true });
+  }
+
+  // Оборачиваем текст во временный <mark class="pending-selection">
+  _applyPendingSelectionMark(range) {
+    this._removePendingSelectionMark();
+    const mark = document.createElement('mark');
+    mark.className = 'pending-selection';
+    try {
+      mark.appendChild(range.extractContents());
+      range.insertNode(mark);
+    } catch {
+      try { range.surroundContents(mark); } catch {}
+    }
+  }
+
+  // Убираем временную метку (восстанавливаем DOM)
+  _removePendingSelectionMark() {
+    const mark = document.querySelector('mark.pending-selection');
+    if (!mark) return;
+    const parent = mark.parentNode;
+    while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+    parent.removeChild(mark);
+    try { parent.normalize(); } catch {}
+  }
+
   // Запускаем таймер: через 1.2с снимаем нативное выделение.
   // Если пользователь двигает ручки — selectionchange сбрасывает таймер заново.
   // Наш бар и pendingSelection.range при этом сохраняются — кнопки работают.
@@ -1159,16 +1261,23 @@ class App {
     // Push to remote sync
     this.pushAnnotation(this.currentBook, ann).catch(() => {});
 
-    // Применяем визуальное выделение сразу (для TXT/FB2/EPUB)
-    const savedRange = this.pendingSelection?.range;
+    const savedRange = this.pendingSelection?.range; // есть только на десктопе
     this.pendingSelection = null;
-    this.hideSelectionBar();
 
-    // Clear browser selection
+    // Убираем временную метку выделения (iOS custom selection)
+    this._removePendingSelectionMark();
+    this.hideSelectionBar();
     try { window.getSelection()?.removeAllRanges(); } catch {}
 
-    if (savedRange && this.currentBook?.format !== 'pdf') {
-      try { applyHighlightRange(savedRange, id, type); } catch {}
+    if (this.currentBook?.format !== 'pdf') {
+      try {
+        const tc = document.getElementById('text-content');
+        if (tc) {
+          // Десктоп: используем сохранённый range; iOS: ищем текст в DOM
+          const range = savedRange || findTextRange(tc, ann.quote);
+          if (range) applyHighlightRange(range, id, type);
+        }
+      } catch {}
     }
 
     this.updateAnnotationBadge();
@@ -2240,6 +2349,7 @@ tags:
     // Note modal
     const closeNoteModal = () => {
       document.getElementById('note-modal').classList.remove('open');
+      this._removePendingSelectionMark();
       this.pendingSelection = null;
     };
     on('note-modal-close', 'click', closeNoteModal);
@@ -2268,8 +2378,12 @@ tags:
       if (e.target.closest('#selection-bar')) return;
       if (document.getElementById('note-modal')?.classList.contains('open')) return;
       setTimeout(() => {
+        const bar = document.getElementById('selection-bar');
+        if (bar && bar.style.display !== 'flex') return; // уже скрыт
+        // Если нет активного нативного выделения (и модалка закрыта) — скрываем
         const sel = window.getSelection();
         if (!sel || sel.isCollapsed) {
+          this._removePendingSelectionMark();
           this.hideSelectionBar();
           this.pendingSelection = null;
         }
