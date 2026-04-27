@@ -8,9 +8,22 @@
 // ── BOOK HASH ─────────────────────────────────────────────────
 async function computeBookHash(buffer) {
   try {
-    const sample = buffer instanceof ArrayBuffer
-      ? buffer.slice(0, 8192)
-      : buffer;
+    let sample;
+    if (buffer instanceof ArrayBuffer) {
+      // Стандартный случай
+      sample = buffer.byteLength > 8192 ? buffer.slice(0, 8192) : buffer;
+    } else if (ArrayBuffer.isView(buffer)) {
+      // Uint8Array и другие TypedArray — берём первые 8 КБ через underlying buffer
+      const ab    = buffer.buffer;
+      const start = buffer.byteOffset;
+      const end   = start + Math.min(buffer.byteLength, 8192);
+      sample = ab.slice(start, end);
+    } else if (typeof Blob !== 'undefined' && buffer instanceof Blob) {
+      // Safari иногда возвращает Blob из IndexedDB
+      sample = await buffer.slice(0, 8192).arrayBuffer();
+    } else {
+      return null;
+    }
     const hash = await crypto.subtle.digest('SHA-256', sample);
     return Array.from(new Uint8Array(hash))
       .map(b => b.toString(16).padStart(2, '0'))
@@ -174,6 +187,29 @@ class SyncClient {
   async getAnnotations(bookHash) {
     const data = await this._readData();
     return data.annotations[bookHash] || [];
+  }
+
+  // Сохраняет несколько аннотаций за один запрос (upsert)
+  async saveAnnotations(bookHash, annotations) {
+    const data = await this._readData();
+    if (!data.annotations[bookHash]) data.annotations[bookHash] = [];
+    const list = data.annotations[bookHash];
+    for (const ann of annotations) {
+      const uuid = ann.ann_uuid || ann.uuid;
+      if (!uuid) continue;
+      const entry = {
+        ann_uuid:   uuid,
+        type:       ann.type,
+        quote:      ann.quote,
+        note:       ann.note || '',
+        context:    ann.context || {},
+        created_at: ann.createdAt || ann.created_at,
+      };
+      const idx = list.findIndex(a => a.ann_uuid === uuid);
+      if (idx >= 0) list[idx] = entry;
+      else list.push(entry);
+    }
+    await this._writeData(data);
   }
 
   // ── DELETED ANNOTATION UUIDs (tombstones) ────────────────

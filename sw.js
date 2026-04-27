@@ -1,4 +1,4 @@
-const CACHE = 'reader-v2';
+const CACHE = 'reader-v4';
 const PRECACHE = [
   './index.html',
   './app.js',

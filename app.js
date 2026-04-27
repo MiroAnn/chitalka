@@ -2000,17 +2000,14 @@ tags:
       // Берём кешированный хеш или вычисляем из содержимого файла
       const hash = book.syncHash || await computeBookHash(book.content);
       if (!hash) return 0;
-      // Кешируем хеш если ещё не был сохранён
-      if (!book.syncHash) {
-        await this.db.updateBook(bookId, { syncHash: hash });
-      }
-      // Пушим каждую аннотацию (генерируем uuid для несинхронизированных)
+      // Гарантируем uuid для каждой аннотации
       for (const ann of anns) {
         if (!ann.uuid) {
           ann.uuid = crypto.randomUUID?.() || Math.random().toString(36).slice(2);
         }
-        await this.sync.saveAnnotation(hash, ann);
       }
+      // Сохраняем все аннотации одним запросом к Gist (надёжнее, чем по одной)
+      await this.sync.saveAnnotations(hash, anns);
       return anns.length;
     } catch (e) {
       console.warn('Backup before delete failed:', e);
@@ -2018,13 +2015,27 @@ tags:
     }
   }
 
-  // Пушим локальные аннотации без UUID (сохранённые до настройки синка)
+  // Пушим локальные аннотации в Gist одним запросом при открытии книги.
+  // Охватывает аннотации без uuid (добавленные до синка) и аннотации,
+  // которые по каким-то причинам не попали в Gist раньше.
   async _pushUnsynced(book) {
     if (!this.sync || !this.syncReady) return;
-    const unsynced = this.currentAnnotations.filter(a => !a.uuid);
-    for (const ann of unsynced) {
-      await this.pushAnnotation(book, ann).catch(() => {});
-    }
+    if (!this.currentAnnotations.length) return;
+    try {
+      const hash = await this.ensureBookHash(book);
+      if (!hash) return;
+      // Назначаем uuid тем у кого его нет
+      for (const ann of this.currentAnnotations) {
+        if (!ann.uuid) {
+          ann.uuid = crypto.randomUUID?.() || Math.random().toString(36).slice(2);
+          await this.db._req(
+            this.db._store('annotations','readwrite').put(ann)
+          ).catch(() => {});
+        }
+      }
+      // Пишем все аннотации в Gist одним запросом (upsert)
+      await this.sync.saveAnnotations(hash, this.currentAnnotations);
+    } catch (e) { console.warn('_pushUnsynced failed:', e); }
   }
 
   // Сохраняем позицию (дебаунс 4с)
@@ -2087,24 +2098,17 @@ tags:
     try {
       const hash = await this.ensureBookHash(book);
       if (!hash) return;
-      const needsUuid = !ann.uuid;
-      if (needsUuid) {
+      // Генерируем uuid и сохраняем в DB до записи в Gist.
+      // Если Gist упадёт — uuid уже есть локально, повтор через _pushUnsynced при
+      // следующем открытии книги.
+      if (!ann.uuid) {
         ann.uuid = crypto.randomUUID?.() || Math.random().toString(36).slice(2);
-      }
-      // Сначала сохраняем в Gist — если упадёт, uuid не сохранится в DB,
-      // и _pushUnsynced сможет попробовать снова
-      await this.sync.saveAnnotation(hash, ann);
-      // Только после успешной синхронизации сохраняем uuid в IndexedDB
-      if (needsUuid) {
         await this.db._req(
           this.db._store('annotations','readwrite').put(ann)
         );
       }
-    } catch (e) {
-      // Если sync упал — убираем uuid чтобы повторная попытка была возможна
-      if (e && ann.uuid && !ann._hadUuid) ann.uuid = undefined;
-      console.warn('Sync annotation failed:', e);
-    }
+      await this.sync.saveAnnotation(hash, ann);
+    } catch (e) { console.warn('Sync annotation failed:', e); }
   }
 
   async pushDeleteAnnotation(book, ann) {
