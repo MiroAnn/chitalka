@@ -1066,13 +1066,14 @@ class App {
     const text = sel.toString().trim();
     if (text.length < 2) return;
 
-    let x = window.innerWidth / 2, y = 200;
+    let x = window.innerWidth / 2, y = 260;
     let savedRange = null;
     try {
       const range = sel.getRangeAt(0);
       const rect = range.getBoundingClientRect();
       x = rect.left + rect.width / 2;
-      y = rect.top - 10;
+      // Показываем панель НИЖЕ выделения — iOS меню появляется сверху, так они не перекрываются
+      y = rect.bottom + 12;
       savedRange = range.cloneRange();
     } catch {}
 
@@ -1229,8 +1230,10 @@ class App {
     bar.style.display = 'flex';
 
     const barW = 200;
+    const barH = 48;
     const clampedX = Math.max(barW / 2 + 10, Math.min(window.innerWidth - barW / 2 - 10, x));
-    const clampedY = Math.max(60, y - 60);
+    // Панель ниже выделения; если упирается в низ экрана — поднимаем
+    const clampedY = Math.min(y, window.innerHeight - barH - 16);
 
     bar.style.left = clampedX + 'px';
     bar.style.top = clampedY + 'px';
