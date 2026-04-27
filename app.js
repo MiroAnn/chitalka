@@ -1403,24 +1403,26 @@ class App {
     const lastExport  = timestamps[this.currentBook.id] || 0;
 
     if (vaultName) {
-      const vEnc = encodeURIComponent(vaultName);
-      const fEnc = encodeURIComponent(filename);
+      // Встроенная схема Obsidian — не требует плагинов
+      // obsidian://new?vault=VAULT&file=FILE&content=CONTENT[&append=true]
+      const vEnc   = encodeURIComponent(vaultName);
+      const fEnc   = encodeURIComponent(filename);
 
-      const tryAdvancedURI = (content, mode) => {
-        const dataEnc = encodeURIComponent(content);
-        const uri = `obsidian://advanced-uri?vault=${vEnc}&filepath=${fEnc}&data=${dataEnc}&mode=${mode}`;
+      const tryObsidianURI = (content, append) => {
+        const cEnc = encodeURIComponent(content);
+        const base = `obsidian://new?vault=${vEnc}&file=${fEnc}&content=${cEnc}`;
+        const uri  = append ? base + '&append=true' : base;
         if (uri.length < 8000) {
           window.location.href = uri;
           return true;
         }
-        return false; // слишком длинный
+        return false; // слишком длинный — упадём в fallback
       };
 
       if (lastExport === 0) {
-        // Первый экспорт — создаём или перезаписываем файл целиком
+        // Первый экспорт — создаём файл целиком
         const fullMd = this.generateObsidianMD(this.currentBook, this.currentAnnotations);
-        // mode=overwrite создаёт файл если не существует, или перезаписывает — надёжнее чем mode=new
-        const sent = tryAdvancedURI(fullMd, 'overwrite');
+        const sent   = tryObsidianURI(fullMd, false);
         if (sent) {
           timestamps[this.currentBook.id] = Date.now();
           await this.db.setSetting('obsidianExportTimestamps', timestamps);
@@ -1428,14 +1430,14 @@ class App {
         }
         // URI слишком длинный — упадём в fallback ниже
       } else {
-        // Последующий экспорт — только новые аннотации
+        // Последующий экспорт — только новые аннотации (append)
         const newAnns = this.currentAnnotations.filter(a => a.createdAt > lastExport);
         if (newAnns.length === 0) {
           this.showToast('Нет новых заметок с последнего экспорта');
           return;
         }
         const deltaMd = this._generateAnnotationsOnlyMD(newAnns);
-        const sent = tryAdvancedURI(deltaMd, 'append');
+        const sent    = tryObsidianURI(deltaMd, true);
         if (sent) {
           timestamps[this.currentBook.id] = Date.now();
           await this.db.setSetting('obsidianExportTimestamps', timestamps);
