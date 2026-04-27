@@ -1899,52 +1899,44 @@ tags:
     } catch { return null; }
   }
 
-  // Мёрджим удалённые аннотации с локальными (добавляем новые, удаляем tombstone'd)
+  // Мёрджим удалённые аннотации с локальными
   async _mergeRemoteAnnotations(book, remoteAnns) {
     if (!this.sync || !this.syncReady) return;
 
-    // Сначала убедимся что все локальные аннотации запушены на сервер
-    await this._pushUnsynced(book);
-
-    // Получаем список uuid удалённых аннотаций (tombstones)
-    let deletedUuids = new Set();
+    // Удаляем локальные аннотации которые удалили на другом устройстве (tombstones)
     try {
-      const deleted = await this.sync.getDeletedAnnotationUuids();
-      deletedUuids = new Set(deleted);
+      const deletedUuids = new Set(await this.sync.getDeletedAnnotationUuids());
+      if (deletedUuids.size > 0) {
+        let deletedCount = 0;
+        for (const ann of [...this.currentAnnotations]) {
+          if (ann.uuid && deletedUuids.has(ann.uuid)) {
+            await this.db.deleteAnnotation(ann.id).catch(() => {});
+            removeHighlightMark(ann.id);
+            this.currentAnnotations = this.currentAnnotations.filter(a => a.id !== ann.id);
+            deletedCount++;
+          }
+        }
+        if (deletedCount > 0) {
+          this.updateAnnotationBadge();
+          const w = deletedCount === 1 ? 'заметка' : deletedCount < 5 ? 'заметки' : 'заметок';
+          this.showToast(`🗑 Удалено ${deletedCount} ${w} (синхронизация)`);
+        }
+      }
     } catch {}
 
-    // ── Удаляем локальные аннотации которые удалили на другом устройстве ──
-    let deletedCount = 0;
-    for (const ann of [...this.currentAnnotations]) {
-      if (ann.uuid && deletedUuids.has(ann.uuid)) {
-        try {
-          await this.db.deleteAnnotation(ann.id);
-          removeHighlightMark(ann.id);
-          this.currentAnnotations = this.currentAnnotations.filter(a => a.id !== ann.id);
-          deletedCount++;
-        } catch {}
-      }
-    }
-    if (deletedCount > 0) this.updateAnnotationBadge();
+    // Пушим аннотации которые ещё не в Gist (добавлены до настройки синка)
+    await this._pushUnsynced(book);
 
     if (!remoteAnns || !remoteAnns.length) return;
 
-    // UUID локальных аннотаций (после удаления tombstone'd)
+    // UUID локальных аннотаций
     const localUuids = new Set(
       this.currentAnnotations.map(a => a.uuid || a.ann_uuid).filter(Boolean)
     );
 
-    // Только те что есть удалённо, нет локально и не удалены (не tombstone)
-    const toAdd = remoteAnns.filter(ra =>
-      ra.ann_uuid && !localUuids.has(ra.ann_uuid) && !deletedUuids.has(ra.ann_uuid)
-    );
-    if (!toAdd.length) {
-      if (deletedCount > 0) {
-        const w = deletedCount === 1 ? 'заметка' : deletedCount < 5 ? 'заметки' : 'заметок';
-        this.showToast(`🗑 Удалено ${deletedCount} ${w} (синхронизация)`);
-      }
-      return;
-    }
+    // Только те что есть в Gist но нет локально
+    const toAdd = remoteAnns.filter(ra => ra.ann_uuid && !localUuids.has(ra.ann_uuid));
+    if (!toAdd.length) return;
 
     for (const ra of toAdd) {
       try {
@@ -1965,13 +1957,12 @@ tags:
 
     this.updateAnnotationBadge();
 
-    // Перерисовываем подсветки в тексте
+    // Применяем подсветки для новых аннотаций
     const tc = document.getElementById('text-content');
     if (tc) {
-      const newAnns = toAdd.map(ra => {
-        return this.currentAnnotations.find(a => a.uuid === ra.ann_uuid);
-      }).filter(Boolean);
-      for (const ann of newAnns) {
+      for (const ra of toAdd) {
+        const ann = this.currentAnnotations.find(a => a.uuid === ra.ann_uuid);
+        if (!ann) continue;
         try {
           const range = findTextRange(tc, ann.quote);
           if (range) applyHighlightRange(range, ann.id, ann.type);
@@ -1981,7 +1972,6 @@ tags:
 
     const n = toAdd.length;
     const word = n === 1 ? 'заметка' : n < 5 ? 'заметки' : 'заметок';
-    // Если у книги не было аннотаций до мёрджа — скорее всего это восстановление после удаления
     const wasEmpty = (this.currentAnnotations.length - n) === 0;
     if (wasEmpty) {
       this.showToast(`☁️ Восстановлено ${n} ${word} из Gist`);
@@ -2015,27 +2005,13 @@ tags:
     }
   }
 
-  // Пушим локальные аннотации в Gist одним запросом при открытии книги.
-  // Охватывает аннотации без uuid (добавленные до синка) и аннотации,
-  // которые по каким-то причинам не попали в Gist раньше.
+  // Пушим только аннотации без uuid (добавленные до подключения синка)
   async _pushUnsynced(book) {
     if (!this.sync || !this.syncReady) return;
-    if (!this.currentAnnotations.length) return;
-    try {
-      const hash = await this.ensureBookHash(book);
-      if (!hash) return;
-      // Назначаем uuid тем у кого его нет
-      for (const ann of this.currentAnnotations) {
-        if (!ann.uuid) {
-          ann.uuid = crypto.randomUUID?.() || Math.random().toString(36).slice(2);
-          await this.db._req(
-            this.db._store('annotations','readwrite').put(ann)
-          ).catch(() => {});
-        }
-      }
-      // Пишем все аннотации в Gist одним запросом (upsert)
-      await this.sync.saveAnnotations(hash, this.currentAnnotations);
-    } catch (e) { console.warn('_pushUnsynced failed:', e); }
+    const unsynced = this.currentAnnotations.filter(a => !a.uuid);
+    for (const ann of unsynced) {
+      await this.pushAnnotation(book, ann).catch(() => {});
+    }
   }
 
   // Сохраняем позицию (дебаунс 4с)
