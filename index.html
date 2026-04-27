@@ -32,10 +32,9 @@
       </div>
       <div class="empty-library" id="empty-library" style="display:none">
         <div class="empty-icon">📖</div>
-        <p>Библиотека пуста.<br>Нажми <strong>+</strong> чтобы добавить книгу.<br>Поддерживаются EPUB, PDF, TXT, FB2.</p>
+        <p>Библиотека пуста.<br>Добавь книги через Dropbox.<br>Поддерживаются EPUB, PDF, TXT, FB2.</p>
       </div>
     </div>
-    <button class="add-book-btn" id="add-book-btn" title="Добавить книгу">+</button>
   </div>
 
   <!-- ══ READER ════════════════════════════════════════════ -->
@@ -152,10 +151,6 @@
     </div>
   </div>
 
-  <!-- ══ DRAG HINT ═════════════════════════════════════════ -->
-  <div class="dragover-hint" id="dragover-hint">
-    Перетащи книгу сюда
-  </div>
 
   <!-- ══ ANNOTATION POPOVER ══════════════════════════════════ -->
   <div id="ann-popover">
@@ -170,10 +165,7 @@
   <!-- ══ TOAST ═════════════════════════════════════════════ -->
   <div id="toast"></div>
 
-  <!-- ══ HIDDEN FILE INPUT ════════════════════════════════ -->
-  <input type="file" id="file-input" accept=".epub,.pdf,.txt,.fb2" style="display:none" multiple>
-
-  <!-- ══ SYNC MODAL ═══════════════════════════════════════════ -->
+<!-- ══ SYNC MODAL ═══════════════════════════════════════════ -->
   <div id="sync-modal">
     <div class="sync-modal-inner">
       <div class="sync-modal-header">

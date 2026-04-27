@@ -234,22 +234,6 @@ html, body {
 .empty-library .empty-icon { font-size: 56px; }
 .empty-library p { font-size: 15px; line-height: 1.5; max-width: 280px; }
 
-.add-book-btn {
-  position: fixed;
-  bottom: 28px; right: 24px;
-  width: 58px; height: 58px;
-  border-radius: 50%;
-  background: var(--accent);
-  color: white;
-  border: none; cursor: pointer;
-  font-size: 28px; line-height: 1;
-  box-shadow: 0 4px 16px rgba(92,61,30,0.4);
-  display: flex; align-items: center; justify-content: center;
-  transition: transform 0.15s, box-shadow 0.15s;
-  z-index: 10;
-}
-.add-book-btn:hover { transform: scale(1.07); box-shadow: 0 6px 20px rgba(92,61,30,0.5); }
-.add-book-btn:active { transform: scale(0.95); }
 
 /* ── READER ──────────────────────────────────────────────── */
 #reader {
@@ -1057,22 +1041,6 @@ mark.reader-highlight-note:hover { background: rgba(100, 160, 255, 0.45); }
 }
 #overlay.show { display: block; }
 
-/* ── DRAG & DROP ─────────────────────────────────────────── */
-.dragover-hint {
-  position: fixed;
-  inset: 0;
-  background: rgba(92,61,30,0.12);
-  border: 3px dashed var(--accent);
-  z-index: 500;
-  display: none;
-  align-items: center;
-  justify-content: center;
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--accent);
-  pointer-events: none;
-}
-.dragover-hint.show { display: flex; }
 
 /* ── SYNC MODAL ──────────────────────────────────────────── */
 #sync-modal {

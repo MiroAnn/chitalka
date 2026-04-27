@@ -357,18 +357,37 @@ async function parseEPUBNative(buffer) {
 function findTextRange(container, searchText) {
   if (!searchText || searchText.length < 2 || !container) return null;
 
+  // Нормализуем пробелы: sel.toString() может иметь \n там где DOM хранит пробел
+  const norm = s => s.replace(/\s+/g, ' ').trim();
+  const needle = norm(searchText);
+
   const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
   const nodes = [];
   let totalText = '';
   let node;
   while ((node = walker.nextNode())) {
-    // пропускаем текст внутри самих mark-элементов при переиндексации
     nodes.push({ node, start: totalText.length });
     totalText += node.textContent;
   }
 
-  const idx = totalText.indexOf(searchText);
-  if (idx === -1) return null;
+  // Сначала точный поиск, потом нормализованный
+  let idx = totalText.indexOf(searchText);
+  if (idx === -1) {
+    const normTotal = norm(totalText);
+    const normIdx   = normTotal.indexOf(needle);
+    if (normIdx === -1) return null;
+    // Пересчитываем позицию в оригинальном тексте через нормализованную карту
+    let origPos = 0, normPos = 0;
+    while (normPos < normIdx && origPos < totalText.length) {
+      if (/\s/.test(totalText[origPos])) {
+        while (origPos < totalText.length && /\s/.test(totalText[origPos])) origPos++;
+        normPos++;
+      } else {
+        origPos++; normPos++;
+      }
+    }
+    idx = origPos;
+  }
   const endIdx = idx + searchText.length;
 
   let startNode = null, startOff = 0, endNode = null, endOff = 0;
@@ -710,8 +729,10 @@ class App {
     // Убираем PDF-свайп листенеры
     const body = document.getElementById('reader-body');
     if (this._pdfSwipeStart) body.removeEventListener('touchstart', this._pdfSwipeStart);
+    if (this._pdfSwipeMove) body.removeEventListener('touchmove',  this._pdfSwipeMove);
     if (this._pdfSwipeEnd)   body.removeEventListener('touchend',   this._pdfSwipeEnd);
     this._pdfSwipeStart = null;
+    this._pdfSwipeMove  = null;
     this._pdfSwipeEnd   = null;
     // Убираем отслеживание выделения
     if (this._selectionChangeHandler) {
@@ -810,14 +831,26 @@ class App {
     });
 
     // Свайп пальцем (iPad) для перелистывания страниц PDF
-    let _swipeX = 0;
+    // Игнорируем мультитач (pinch-zoom) и вертикальный скролл
+    let _swipeX = 0, _swipeY = 0, _swipeMulti = false;
     const readerBody = document.getElementById('reader-body');
     readerBody.addEventListener('touchstart', this._pdfSwipeStart = (e) => {
       _swipeX = e.touches[0].clientX;
+      _swipeY = e.touches[0].clientY;
+      _swipeMulti = e.touches.length > 1;
+    }, { passive: true });
+    // Если в процессе свайпа добавился второй палец — отмечаем как мультитач
+    readerBody.addEventListener('touchmove', this._pdfSwipeMove = (e) => {
+      if (e.touches.length > 1) _swipeMulti = true;
     }, { passive: true });
     readerBody.addEventListener('touchend', this._pdfSwipeEnd = (e) => {
+      if (_swipeMulti || e.changedTouches.length !== 1) return; // pinch-zoom — пропускаем
       const dx = e.changedTouches[0].clientX - _swipeX;
-      if (Math.abs(dx) > 50) this.changePDFPage(dx < 0 ? 1 : -1);
+      const dy = e.changedTouches[0].clientY - _swipeY;
+      // Только горизонтальный свайп: по X больше чем по Y, и минимум 90px
+      if (Math.abs(dx) > 90 && Math.abs(dx) > Math.abs(dy) * 2) {
+        this.changePDFPage(dx < 0 ? 1 : -1);
+      }
     }, { passive: true });
 
     // Text selection
@@ -1866,21 +1899,52 @@ tags:
     } catch { return null; }
   }
 
-  // Мёрджим удалённые аннотации с локальными (добавляем то чего нет)
+  // Мёрджим удалённые аннотации с локальными (добавляем новые, удаляем tombstone'd)
   async _mergeRemoteAnnotations(book, remoteAnns) {
-    if (!remoteAnns || !remoteAnns.length) return;
+    if (!this.sync || !this.syncReady) return;
 
     // Сначала убедимся что все локальные аннотации запушены на сервер
     await this._pushUnsynced(book);
 
-    // UUID локальных аннотаций
+    // Получаем список uuid удалённых аннотаций (tombstones)
+    let deletedUuids = new Set();
+    try {
+      const deleted = await this.sync.getDeletedAnnotationUuids();
+      deletedUuids = new Set(deleted);
+    } catch {}
+
+    // ── Удаляем локальные аннотации которые удалили на другом устройстве ──
+    let deletedCount = 0;
+    for (const ann of [...this.currentAnnotations]) {
+      if (ann.uuid && deletedUuids.has(ann.uuid)) {
+        try {
+          await this.db.deleteAnnotation(ann.id);
+          removeHighlightMark(ann.id);
+          this.currentAnnotations = this.currentAnnotations.filter(a => a.id !== ann.id);
+          deletedCount++;
+        } catch {}
+      }
+    }
+    if (deletedCount > 0) this.updateAnnotationBadge();
+
+    if (!remoteAnns || !remoteAnns.length) return;
+
+    // UUID локальных аннотаций (после удаления tombstone'd)
     const localUuids = new Set(
       this.currentAnnotations.map(a => a.uuid || a.ann_uuid).filter(Boolean)
     );
 
-    // Только те что есть удалённо но нет локально
-    const toAdd = remoteAnns.filter(ra => ra.ann_uuid && !localUuids.has(ra.ann_uuid));
-    if (!toAdd.length) return;
+    // Только те что есть удалённо, нет локально и не удалены (не tombstone)
+    const toAdd = remoteAnns.filter(ra =>
+      ra.ann_uuid && !localUuids.has(ra.ann_uuid) && !deletedUuids.has(ra.ann_uuid)
+    );
+    if (!toAdd.length) {
+      if (deletedCount > 0) {
+        const w = deletedCount === 1 ? 'заметка' : deletedCount < 5 ? 'заметки' : 'заметок';
+        this.showToast(`🗑 Удалено ${deletedCount} ${w} (синхронизация)`);
+      }
+      return;
+    }
 
     for (const ra of toAdd) {
       try {
@@ -1904,7 +1968,6 @@ tags:
     // Перерисовываем подсветки в тексте
     const tc = document.getElementById('text-content');
     if (tc) {
-      // Добавляем только новые хайлайты (не перерисовываем все)
       const newAnns = toAdd.map(ra => {
         return this.currentAnnotations.find(a => a.uuid === ra.ann_uuid);
       }).filter(Boolean);
@@ -1918,7 +1981,7 @@ tags:
 
     const n = toAdd.length;
     const word = n === 1 ? 'заметка' : n < 5 ? 'заметки' : 'заметок';
-    // Если у книги нет локальных аннотаций до мёрджа — скорее всего это восстановление после удаления
+    // Если у книги не было аннотаций до мёрджа — скорее всего это восстановление после удаления
     const wasEmpty = (this.currentAnnotations.length - n) === 0;
     if (wasEmpty) {
       this.showToast(`☁️ Восстановлено ${n} ${word} из Gist`);
@@ -2024,22 +2087,33 @@ tags:
     try {
       const hash = await this.ensureBookHash(book);
       if (!hash) return;
-      // Генерируем UUID для аннотации если нет
-      if (!ann.uuid) {
+      const needsUuid = !ann.uuid;
+      if (needsUuid) {
         ann.uuid = crypto.randomUUID?.() || Math.random().toString(36).slice(2);
+      }
+      // Сначала сохраняем в Gist — если упадёт, uuid не сохранится в DB,
+      // и _pushUnsynced сможет попробовать снова
+      await this.sync.saveAnnotation(hash, ann);
+      // Только после успешной синхронизации сохраняем uuid в IndexedDB
+      if (needsUuid) {
         await this.db._req(
           this.db._store('annotations','readwrite').put(ann)
         );
       }
-      await this.sync.saveAnnotation(hash, ann);
-    } catch (e) { console.warn('Sync annotation failed:', e); }
+    } catch (e) {
+      // Если sync упал — убираем uuid чтобы повторная попытка была возможна
+      if (e && ann.uuid && !ann._hadUuid) ann.uuid = undefined;
+      console.warn('Sync annotation failed:', e);
+    }
   }
 
   async pushDeleteAnnotation(book, ann) {
     if (!this.sync || !this.syncReady || !ann.uuid) return;
     try {
       const hash = await this.ensureBookHash(book);
-      if (hash) await this.sync.deleteAnnotation(hash, ann.uuid);
+      if (!hash) return;
+      // Удаляем из массива аннотаций и добавляем tombstone в одной операции записи в Gist
+      await this.sync.deleteAnnotationWithTombstone(hash, ann.uuid);
     } catch {}
   }
 
@@ -2310,33 +2384,6 @@ tags:
       const el = document.getElementById(id);
       if (el) el.addEventListener(event, handler, opts);
     };
-
-    // Library: add book
-    document.getElementById('add-book-btn').addEventListener('click', () => {
-      document.getElementById('file-input').click();
-    });
-    document.getElementById('file-input').addEventListener('change', (e) => {
-      if (e.target.files.length) {
-        this.addBooks(Array.from(e.target.files));
-        e.target.value = '';
-      }
-    });
-
-    // Drag & drop
-    const dragHint = document.getElementById('dragover-hint');
-    document.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      dragHint.classList.add('show');
-    });
-    document.addEventListener('dragleave', (e) => {
-      if (!e.relatedTarget) dragHint.classList.remove('show');
-    });
-    document.addEventListener('drop', (e) => {
-      e.preventDefault();
-      dragHint.classList.remove('show');
-      const files = Array.from(e.dataTransfer.files);
-      if (files.length) this.addBooks(files);
-    });
 
     // Reader: back
     on('back-btn', 'click', () => {

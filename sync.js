@@ -176,6 +176,37 @@ class SyncClient {
     return data.annotations[bookHash] || [];
   }
 
+  // ── DELETED ANNOTATION UUIDs (tombstones) ────────────────
+  async getDeletedAnnotationUuids() {
+    const data = await this._readData();
+    return data.deletedAnnotationUuids || [];
+  }
+
+  async addDeletedAnnotationUuid(uuid) {
+    const data = await this._readData();
+    if (!data.deletedAnnotationUuids) data.deletedAnnotationUuids = [];
+    if (!data.deletedAnnotationUuids.includes(uuid)) {
+      data.deletedAnnotationUuids.push(uuid);
+      await this._writeData(data);
+    }
+  }
+
+  // Удаляет аннотацию из массива и сразу добавляет tombstone — одна запись в Gist
+  async deleteAnnotationWithTombstone(bookHash, annUuid) {
+    const data = await this._readData();
+    // Удаляем из массива аннотаций
+    if (data.annotations[bookHash]) {
+      data.annotations[bookHash] = data.annotations[bookHash]
+        .filter(a => a.ann_uuid !== annUuid);
+    }
+    // Добавляем tombstone
+    if (!data.deletedAnnotationUuids) data.deletedAnnotationUuids = [];
+    if (!data.deletedAnnotationUuids.includes(annUuid)) {
+      data.deletedAnnotationUuids.push(annUuid);
+    }
+    await this._writeData(data);
+  }
+
   // ── DELETED DROPBOX PATHS ─────────────────────────────────
   async getDeletedPaths() {
     const data = await this._readData();
