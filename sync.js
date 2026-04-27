@@ -175,6 +175,28 @@ class SyncClient {
     const data = await this._readData();
     return data.annotations[bookHash] || [];
   }
+
+  // ── DELETED DROPBOX PATHS ─────────────────────────────────
+  async getDeletedPaths() {
+    const data = await this._readData();
+    return data.deletedPaths || [];
+  }
+
+  async addDeletedPath(path) {
+    const data = await this._readData();
+    if (!data.deletedPaths) data.deletedPaths = [];
+    if (!data.deletedPaths.includes(path)) {
+      data.deletedPaths.push(path);
+      await this._writeData(data);
+    }
+  }
+
+  async removeDeletedPath(path) {
+    const data = await this._readData();
+    if (!data.deletedPaths) return;
+    data.deletedPaths = data.deletedPaths.filter(p => p !== path);
+    await this._writeData(data);
+  }
 }
 
 // ── DROPBOX SYNC ──────────────────────────────────────────────

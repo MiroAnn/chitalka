@@ -554,8 +554,13 @@ class App {
       card.querySelector('.delete-btn').addEventListener('click', async (e) => {
         e.stopPropagation();
         if (confirm('Удалить книгу?')) {
-          // Сначала сохраняем заметки в Gist, потом удаляем локально
+          // Сначала сохраняем заметки в Gist
           const backed = await this._backupAnnotationsBeforeDelete(id);
+          // Если книга из Dropbox — записываем путь в Gist чтобы удалить на других устройствах
+          const book = await this.db.getBook(id);
+          if (book?.dropboxPath && this.sync && this.syncReady) {
+            await this.sync.addDeletedPath(book.dropboxPath).catch(() => {});
+          }
           await this.db.deleteBook(id);
           await this.renderLibrary();
           if (backed > 0) {
@@ -2060,63 +2065,32 @@ tags:
     });
   }
 
-  // Automatically download books from Dropbox that aren't in the local library yet
+  // Синхронизирует удаления книг между устройствами через Gist.
+  // Больше НЕ скачивает книги автоматически — только ручное скачивание через модал Dropbox.
   async _autoSyncDropbox() {
     if (!this.dropbox || this._autoSyncing) return;
+    if (!this.sync || !this.syncReady) return; // нужен Gist для синхронизации удалений
     this._autoSyncing = true;
     try {
-      const [remoteFiles, localBooks] = await Promise.all([
-        this.dropbox.listBooks(),
+      const [deletedPaths, localBooks] = await Promise.all([
+        this.sync.getDeletedPaths(),
         this.db.getAllBooks(),
       ]);
-      const localPaths = new Set(localBooks.map(b => b.dropboxPath).filter(Boolean));
+      if (!deletedPaths.length) return;
 
-      // Исключаем файлы которые уже скачиваются вручную через модал
-      const newFiles = remoteFiles.filter(f =>
-        !localPaths.has(f.path) && !this._downloadingPaths.has(f.path)
-      );
-      if (newFiles.length === 0) return;
+      const deletedSet = new Set(deletedPaths);
+      // Находим локальные книги чей Dropbox-путь помечен как удалённый на другом устройстве
+      const toDelete = localBooks.filter(b => b.dropboxPath && deletedSet.has(b.dropboxPath));
+      if (!toDelete.length) return;
 
-      this.showToast(`📦 Скачиваем ${newFiles.length} ${this._pluralBooks(newFiles.length)} из Dropbox…`, 4000);
-
-      let added = 0;
-      for (const f of newFiles) {
-        // Перепроверяем перед каждой загрузкой — вдруг уже добавили за это время
-        if (this._downloadingPaths.has(f.path)) continue;
-        const freshBooks = await this.db.getAllBooks();
-        const freshPaths = new Set(freshBooks.map(b => b.dropboxPath).filter(Boolean));
-        if (freshPaths.has(f.path)) continue;
-
-        try {
-          const buf = await this.dropbox.downloadFile(f.path);
-          const ext = f.ext;
-          let meta = { title: f.name.replace(/\.[^.]+$/, ''), author: '', coverUrl: null, html: null };
-          if (ext === 'txt')  { const p = parseTXT(buf);              meta = { ...meta, ...p }; }
-          if (ext === 'fb2')  { const p = parseFB2(buf);              meta = { ...meta, ...p }; }
-          if (ext === 'epub') { const p = await parseEPUBNative(buf); meta = { ...meta, ...p }; }
-
-          await this.db.addBook({
-            title:       meta.title,
-            author:      meta.author || '',
-            format:      ext,
-            content:     buf,
-            coverUrl:    meta.coverUrl || null,
-            html:        meta.html || null,
-            progress:    0,
-            addedAt:     Date.now(),
-            lastRead:    null,
-            dropboxPath: f.path,
-          });
-          added++;
-        } catch { /* пропускаем отдельные ошибки */ }
+      for (const book of toDelete) {
+        await this._backupAnnotationsBeforeDelete(book.id);
+        await this.db.deleteBook(book.id);
       }
-
-      if (added > 0) {
-        await this.renderLibrary();
-        this.showToast(`✓ Добавлено ${added} ${this._pluralBooks(added)} из Dropbox`);
-      }
+      await this.renderLibrary();
+      this.showToast(`🗑 Удалено ${toDelete.length} ${this._pluralBooks(toDelete.length)} (синхронизация)`);
     } catch (e) {
-      this.showToast('📦 Dropbox: ' + e.message.slice(0, 80), 5000);
+      console.warn('Dropbox deletion sync failed:', e);
     } finally {
       this._autoSyncing = false;
     }
@@ -2225,35 +2199,55 @@ tags:
       return;
     }
 
-    // Check which books are already in the library
-    const existingBooks = await this.db.getAllBooks();
-    const existingPaths = new Set(existingBooks.map(b => b.dropboxPath).filter(Boolean));
+    // Проверяем что уже в библиотеке и что помечено удалённым
+    const [existingBooks, deletedPaths] = await Promise.all([
+      this.db.getAllBooks(),
+      (this.sync && this.syncReady) ? this.sync.getDeletedPaths().catch(() => []) : [],
+    ]);
+    const existingPathsSet = new Set(existingBooks.map(b => b.dropboxPath).filter(Boolean));
+    const deletedSet       = new Set(deletedPaths);
 
     const ICONS = { epub: '📗', pdf: '📕', txt: '📄', fb2: '📘' };
 
     container.innerHTML = files.map(f => {
-      const already = existingPaths.has(f.path);
-      const icon    = ICONS[f.ext] || '📄';
-      const size    = DropboxSync.formatSize(f.size);
+      const already  = existingPathsSet.has(f.path);
+      const deleted  = deletedSet.has(f.path);
+      const icon     = ICONS[f.ext] || '📄';
+      const size     = DropboxSync.formatSize(f.size);
 
-      return `<div class="dbx-book-item" data-path="${escHtml(f.path)}">
+      let actionBtn;
+      if (already) {
+        actionBtn = '<button class="dbx-dl-btn done" disabled>✓ Есть</button>';
+      } else if (deleted) {
+        actionBtn = `<button class="dbx-restore-btn" data-path="${escHtml(f.path)}" data-name="${escHtml(f.name)}">Вернуть</button>`;
+      } else {
+        actionBtn = `<button class="dbx-dl-btn" data-path="${escHtml(f.path)}" data-name="${escHtml(f.name)}">Скачать</button>`;
+      }
+
+      return `<div class="dbx-book-item${deleted ? ' dbx-deleted' : ''}" data-path="${escHtml(f.path)}">
         <div class="dbx-book-icon">${icon}</div>
         <div class="dbx-book-info">
           <div class="dbx-book-name">${escHtml(f.name)}</div>
-          <div class="dbx-book-meta">${f.ext.toUpperCase()}${size ? ' · ' + size : ''}</div>
+          <div class="dbx-book-meta">${f.ext.toUpperCase()}${size ? ' · ' + size : ''}${deleted ? ' · удалена' : ''}</div>
         </div>
-        <div class="dbx-book-action">
-          ${already
-            ? '<button class="dbx-dl-btn done" disabled>✓ Есть</button>'
-            : `<button class="dbx-dl-btn" data-path="${escHtml(f.path)}" data-name="${escHtml(f.name)}">Скачать</button>`
-          }
-        </div>
+        <div class="dbx-book-action">${actionBtn}</div>
       </div>`;
     }).join('');
 
-    // Bind download buttons
+    // Кнопки скачать
     container.querySelectorAll('.dbx-dl-btn:not(.done)').forEach(btn => {
       btn.addEventListener('click', () => this.downloadDropboxBook(btn));
+    });
+    // Кнопки вернуть (убираем из удалённых и скачиваем)
+    container.querySelectorAll('.dbx-restore-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const path = btn.dataset.path;
+        btn.textContent = '⏳'; btn.disabled = true;
+        if (this.sync && this.syncReady) {
+          await this.sync.removeDeletedPath(path).catch(() => {});
+        }
+        await this.downloadDropboxBook(btn);
+      });
     });
   }
 
