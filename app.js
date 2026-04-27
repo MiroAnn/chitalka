@@ -554,9 +554,15 @@ class App {
       card.querySelector('.delete-btn').addEventListener('click', async (e) => {
         e.stopPropagation();
         if (confirm('Удалить книгу?')) {
+          // Сначала сохраняем заметки в Gist, потом удаляем локально
+          const backed = await this._backupAnnotationsBeforeDelete(id);
           await this.db.deleteBook(id);
           await this.renderLibrary();
-          this.showToast('Книга удалена');
+          if (backed > 0) {
+            this.showToast(`Книга удалена · ${backed} заметок сохранены в Gist ☁️`);
+          } else {
+            this.showToast('Книга удалена');
+          }
         }
       });
     });
@@ -1400,13 +1406,22 @@ class App {
       const vEnc = encodeURIComponent(vaultName);
       const fEnc = encodeURIComponent(filename);
 
-      if (lastExport === 0) {
-        // Первый экспорт — создаём файл целиком
-        const fullMd  = this.generateObsidianMD(this.currentBook, this.currentAnnotations);
-        const dataEnc = encodeURIComponent(fullMd);
-        const uri = `obsidian://advanced-uri?vault=${vEnc}&filepath=${fEnc}&data=${dataEnc}&mode=new`;
+      const tryAdvancedURI = (content, mode) => {
+        const dataEnc = encodeURIComponent(content);
+        const uri = `obsidian://advanced-uri?vault=${vEnc}&filepath=${fEnc}&data=${dataEnc}&mode=${mode}`;
         if (uri.length < 8000) {
           window.location.href = uri;
+          return true;
+        }
+        return false; // слишком длинный
+      };
+
+      if (lastExport === 0) {
+        // Первый экспорт — создаём или перезаписываем файл целиком
+        const fullMd = this.generateObsidianMD(this.currentBook, this.currentAnnotations);
+        // mode=overwrite создаёт файл если не существует, или перезаписывает — надёжнее чем mode=new
+        const sent = tryAdvancedURI(fullMd, 'overwrite');
+        if (sent) {
           timestamps[this.currentBook.id] = Date.now();
           await this.db.setSetting('obsidianExportTimestamps', timestamps);
           return;
@@ -1420,10 +1435,8 @@ class App {
           return;
         }
         const deltaMd = this._generateAnnotationsOnlyMD(newAnns);
-        const dataEnc = encodeURIComponent(deltaMd);
-        const uri = `obsidian://advanced-uri?vault=${vEnc}&filepath=${fEnc}&data=${dataEnc}&mode=append`;
-        if (uri.length < 8000) {
-          window.location.href = uri;
+        const sent = tryAdvancedURI(deltaMd, 'append');
+        if (sent) {
           timestamps[this.currentBook.id] = Date.now();
           await this.db.setSetting('obsidianExportTimestamps', timestamps);
           return;
@@ -1895,7 +1908,41 @@ tags:
 
     const n = toAdd.length;
     const word = n === 1 ? 'заметка' : n < 5 ? 'заметки' : 'заметок';
-    this.showToast(`📝 Синхронизировано ${n} ${word} с другого устройства`);
+    // Если у книги нет локальных аннотаций до мёрджа — скорее всего это восстановление после удаления
+    const wasEmpty = (this.currentAnnotations.length - n) === 0;
+    if (wasEmpty) {
+      this.showToast(`☁️ Восстановлено ${n} ${word} из Gist`);
+    } else {
+      this.showToast(`📝 Синхронизировано ${n} ${word} с другого устройства`);
+    }
+  }
+
+  // Сохраняем все аннотации книги в Gist перед удалением
+  async _backupAnnotationsBeforeDelete(bookId) {
+    if (!this.sync || !this.syncReady) return 0;
+    try {
+      const book = await this.db.getBook(bookId);
+      const anns = await this.db.getAnnotations(bookId);
+      if (!anns.length) return 0;
+      // Берём кешированный хеш или вычисляем из содержимого файла
+      const hash = book.syncHash || await computeBookHash(book.content);
+      if (!hash) return 0;
+      // Кешируем хеш если ещё не был сохранён
+      if (!book.syncHash) {
+        await this.db.updateBook(bookId, { syncHash: hash });
+      }
+      // Пушим каждую аннотацию (генерируем uuid для несинхронизированных)
+      for (const ann of anns) {
+        if (!ann.uuid) {
+          ann.uuid = crypto.randomUUID?.() || Math.random().toString(36).slice(2);
+        }
+        await this.sync.saveAnnotation(hash, ann);
+      }
+      return anns.length;
+    } catch (e) {
+      console.warn('Backup before delete failed:', e);
+      return 0;
+    }
   }
 
   // Пушим локальные аннотации без UUID (сохранённые до настройки синка)
